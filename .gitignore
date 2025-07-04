@@ -12,6 +12,8 @@ build/bin
 frontend/dist
 dist
 dist-ssr
+Docs
+1Docs
 *.local
 
 # Editor directories and files

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import './App.css';
 import { IsDirectory, SelectFile, SelectDirectory, EncryptFile, DecryptFile, EncryptDirectory, DecryptDirectory, GetHint, OpenExternalURL } from '../wailsjs/go/main/App';
-import { OnFileDrop, EventsOn } from '../wailsjs/runtime/runtime';
+import { OnFileDrop } from '../wailsjs/runtime/runtime';
 import fileIcons from './assets/file-icons.json';
-import logo from './assets/images/logo.png'
+import logo from './assets/images/logo.png';
+import folderIcon from './assets/images/folder.svg';
 
 // Helper to clean up file paths that might have prefixes
 const normalizePath = (path: string): string => {
@@ -35,10 +36,6 @@ function App() {
                 handleFileSelect(normalizedPath);
             }
         }, false);
-
-        EventsOn('file-open', (filePath: string) => {
-            handleFileSelect(filePath);
-        });
     }, []);
 
     const handleFileSelect = async (path: string) => {
@@ -141,19 +138,7 @@ function App() {
 
     const getFileIcon = (fileName: string) => {
         const extension = fileName.split('.').pop()?.toLowerCase() || '';
-        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'];
-        const videoExtensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
-
-        let iconFileName;
-
-        if (imageExtensions.includes(extension)) {
-            iconFileName = 'img.png';
-        } else if (videoExtensions.includes(extension)) {
-            iconFileName = 'mp4.png';
-        } else {
-            iconFileName = (fileIcons as Record<string, string>)[extension] || 'file.png';
-        }
-
+        const iconFileName = (fileIcons.mappings as Record<string, string>)[extension] || fileIcons.default;
         return new URL(`./assets/images/icons/${iconFileName}`, import.meta.url).href;
     };
 
@@ -187,7 +172,7 @@ function App() {
 
     const renderFileView = () => (
         <div className="file-view">
-            <img src={isDirectory ? './assets/images/icons/folder.png' : getFileIcon(fileName)} alt="icon" className="file-icon" draggable="false"/>
+            <img src={isDirectory ? folderIcon : getFileIcon(fileName)} alt="icon" className="file-icon" draggable="false"/>
             <div className="file-name">{fileName}</div>
             
             <div className="password-wrapper">
@@ -279,4 +264,3 @@ function App() {
 }
 
 export default App;
-
