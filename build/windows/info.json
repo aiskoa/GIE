@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "1.0",
+			"CompanyName": "AISKOA",
+			"FileDescription": "GIE File Encryption",
+			"LegalCopyright": "AISKOA",
+			"ProductName": "GIE",
+			"Comments": "Encryption and decryption easy."
+		}
+	}
+}

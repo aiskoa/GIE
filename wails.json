@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "gie",
+  "version": "2",
+  "outputfilename": "gie",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Aiskoa",
+    "email": "aiskoa@mail.com"
+  },
+  "options": {
+    "windows": {
+      "width": 520,
+      "height": 780,
+      "resizable": false
+    }
+  }
+}
