@@ -26,13 +26,10 @@ type App struct {
 	ctx context.Context
 }
 
-// NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{}
 }
 
-// startup is called when the app starts. The context is saved
-// so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	fmt.Printf("DEBUG: Registering OnFileDrop handler.\n")
@@ -46,15 +43,12 @@ func (a *App) startup(ctx context.Context) {
 		}
 	})
 
-	// Check if a file path was passed as a command-line argument
 	if len(os.Args) > 1 {
 		filePath := os.Args[1]
 		fmt.Printf("DEBUG: Application launched with argument: %s\n", filePath)
 
-		// You might want to add checks here to ensure it's a .gie file
 		if strings.HasSuffix(strings.ToLower(filePath), ".gie") {
-			// Emit an event to the frontend to handle the decryption
-			// The frontend will then prompt for password and channel
+
 			runtime.EventsEmit(ctx, "wails:open:gie", filePath)
 			fmt.Printf("DEBUG: Emitted wails:open:gie event for file: %s\n", filePath)
 		} else {
@@ -63,7 +57,6 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
-// SelectFile opens a file dialog to select a file.
 func (a *App) SelectFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select File",
@@ -77,10 +70,9 @@ const (
 	HMACSize           = 32               // SHA256 HMAC size
 )
 
-// EncryptionLevel defines parameters for different encryption strengths.
 type EncryptionLevel struct {
 	Iterations int
-	KeyLength  int // in bytes
+	KeyLength  int
 }
 
 var EncryptionLevels = map[string]EncryptionLevel{
@@ -101,7 +93,6 @@ var EncryptionLevelCodesReverse = map[byte]string{
 	2: "High",
 }
 
-// EncryptFile encrypts a single file using AES-CTR and HMAC-SHA256.
 func (a *App) EncryptFile(inputFile string, password string, hint string, encryptionLevel string, channel int) string {
 	if password == "" {
 		return "Encryption failed: password cannot be empty."
@@ -121,7 +112,6 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 	outputFile := inputFile + ".gie"
 	tempOutputFile := outputFile + ".tmp"
 
-	// Generate salts for AES key and HMAC key
 	aesKeySalt, err := GenerateSalt(16)
 	if err != nil {
 		return fmt.Sprintf("error generating AES key salt: %v", err)
@@ -131,24 +121,21 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 		return fmt.Sprintf("error generating HMAC key salt: %v", err)
 	}
 
-	// Derive AES key and HMAC key
 	aesKey := DeriveKeyFromPassword(passwordBytes, aesKeySalt, levelParams.Iterations, levelParams.KeyLength)
 	hmacKey := DeriveKeyFromPassword(passwordBytes, hmacKeySalt, levelParams.Iterations, levelParams.KeyLength)
 
-	// Generate CTR IV
 	ctrIV, err := GenerateIV(CTRIVSize)
 	if err != nil {
 		return fmt.Sprintf("error generating CTR IV: %v", err)
 	}
 
-	// Open input file
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error opening input file: %v", err)
 	}
-	defer inFile.Close() // Ensure input file is closed
+	defer inFile.Close()
 
-	// Create temporary output file
+	// Crea el archivo temporal antes de crear el archio encriptado final bue pensaba hacer otro tipo de validacion pero esto es mejor
 	outFile, err := os.Create(tempOutputFile)
 	if err != nil {
 		return fmt.Sprintf("error creating temporary output file: %v", err)
@@ -156,15 +143,13 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 
 	defer func() {
 		if r := recover(); r != nil {
-			os.Remove(tempOutputFile) // Clean up temp file on panic
+			os.Remove(tempOutputFile)
 			panic(r)
 		}
 	}()
 
-	// Create a buffer to capture metadata for HMAC calculation
 	var metadataBuffer bytes.Buffer
 
-	// Write metadata to metadataBuffer first
 	err = binary.Write(&metadataBuffer, binary.BigEndian, uint16(len(hintBytes)))
 	if err != nil {
 		return fmt.Sprintf("error writing hint length to buffer: %v", err)
@@ -202,7 +187,7 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 
 	// Initialize HMAC and feed it the metadata
 	hmacHasher := hmac.New(sha256.New, hmacKey)
-	hmacHasher.Write(metadataBuffer.Bytes()) // Feed metadata to HMAC
+	hmacHasher.Write(metadataBuffer.Bytes())
 
 	// Initialize AES cipher for CTR mode
 	block, err := aes.NewCipher(aesKey)
@@ -234,16 +219,15 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 			return fmt.Sprintf("error writing encrypted chunk: %v", err)
 		}
 	}
-	inFile.Close() // Explicitly close the input file after reading all its content
+	inFile.Close()
 
-	// Finalize HMAC and write the tag
 	hmacTag := hmacHasher.Sum(nil)
 	_, err = outFile.Write(hmacTag)
 	if err != nil {
 		return fmt.Sprintf("error writing HMAC tag: %v", err)
 	}
-	outFile.Sync()  // Force write to disk
-	outFile.Close() // Close to ensure all data is flushed before verification
+	outFile.Sync()
+	outFile.Close()
 
 	// Verification Step (decrypt the temporary file and verify HMAC)
 	fmt.Printf("DEBUG: Starting verification of %s\n", tempOutputFile)
@@ -255,18 +239,16 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 	}
 
 	fmt.Printf("DEBUG: Verification successful. Attempting to rename %s to %s\n", tempOutputFile, outputFile)
-	// Give the OS a moment to release the file handle before renaming
-	time.Sleep(500 * time.Millisecond) // Increased sleep time
+	time.Sleep(500 * time.Millisecond)
 
-	// Retry renaming the temporary file a few times
-	maxRetries := 10                     // Increased retries
-	retryDelay := 200 * time.Millisecond // Increased retry delay
+	maxRetries := 10
+	retryDelay := 200 * time.Millisecond
 
 	for i := 0; i < maxRetries; i++ {
 		err = os.Rename(tempOutputFile, outputFile)
 		if err == nil {
 			fmt.Printf("DEBUG: Successfully renamed %s to %s\n", tempOutputFile, outputFile)
-			break // Success, exit loop
+			break
 		}
 		fmt.Printf("DEBUG: Rename attempt %d for %s failed: %v. Retrying...\n", i+1, tempOutputFile, err)
 		if i == maxRetries-1 {
@@ -275,31 +257,27 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 		time.Sleep(retryDelay)
 	}
 
-	// If rename still failed after retries
 	if err != nil {
-		os.Remove(tempOutputFile) // Clean up temp file if rename fails
+		os.Remove(tempOutputFile)
 		return fmt.Sprintf("error renaming temporary file: %v", err)
 	}
 
 	fmt.Printf("DEBUG: Renaming successful. Attempting to delete original input file %s\n", inputFile)
-	// Give the OS a moment to release the file handle before attempting to delete the original
 	time.Sleep(100 * time.Millisecond)
 
-	// Attempt to delete the original input file by renaming it first
 	fileToDelete := inputFile + ".todelete"
 	renErr := os.Rename(inputFile, fileToDelete)
 	if renErr != nil {
 		fmt.Printf("WARNING: Could not rename original file %s for deletion: %v\n", inputFile, renErr)
 	} else {
 		maxRetriesRemove := 10
-		retryDelayRemove := 200 * time.Millisecond // 200ms
+		retryDelayRemove := 200 * time.Millisecond
 
 		for i := 0; i < maxRetriesRemove; i++ {
 			removeErr := os.Remove(fileToDelete)
 			if removeErr == nil {
-				break // Success, exit loop
+				break
 			}
-			// If it's the last retry and still an error, print a warning
 			if i == maxRetriesRemove-1 {
 				fmt.Printf("WARNING: Could not delete original file %s after multiple retries: %v\n", fileToDelete, removeErr)
 			}
@@ -317,7 +295,7 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool, ex
 	if err != nil {
 		return fmt.Sprintf("error opening file: %v", err)
 	}
-	defer inFile.Close() // Ensure input file is closed
+	defer inFile.Close()
 
 	fileInfo, err := inFile.Stat()
 	if err != nil {
@@ -327,7 +305,7 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool, ex
 
 	// Create a buffer to capture metadata for HMAC calculation during decryption
 	var metadataBuffer bytes.Buffer
-	metadataReader := io.TeeReader(inFile, &metadataBuffer) // Read from inFile, write to metadataBuffer
+	metadataReader := io.TeeReader(inFile, &metadataBuffer)
 
 	// Read metadata using metadataReader
 	var hintLen uint16
@@ -484,10 +462,9 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool, ex
 		if err != nil {
 			return fmt.Sprintf("error creating temporary output file: %v", err)
 		}
-		defer outFile.Close()           // Ensure output file is closed
-		defer os.Remove(tempOutputFile) // Ensure temp file is cleaned up on error
+		defer outFile.Close()
+		defer os.Remove(tempOutputFile)
 
-		// Decrypt and write data in chunks
 		buf := make([]byte, ChunkSize)
 		for {
 			n, err := reader.Read(buf)
@@ -503,7 +480,7 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool, ex
 			}
 		}
 
-		outFile.Close() // Close to ensure all data is flushed
+		outFile.Close()
 		// Close the input file before attempting to delete it
 		inFile.Close()
 		fmt.Printf("DEBUG: Closed input file %s before deletion attempt.\n", inputFile)
@@ -727,14 +704,14 @@ func (a *App) GetHint(inputFile string) (string, error) {
 	}
 
 	// Basic sanity check for hint length to avoid allocating huge memory for a corrupted file
-	const maxHintLength = 4096 // 4KB, a reasonable limit for a hint
+	const maxHintLength = 4096
 	if hintLen > maxHintLength {
 		return "", fmt.Errorf("hint length (%d) exceeds maximum allowed size", hintLen)
 	}
-    
-    if hintLen == 0 {
-        return "", nil // No hint present
-    }
+
+	if hintLen == 0 {
+		return "", nil
+	}
 
 	// Read the hint itself
 	hintBytes := make([]byte, hintLen)
@@ -759,12 +736,10 @@ func IsPasswordValid(password string) bool {
 
 // IsPathValid checks if a file path is valid.
 func IsPathValid(path string) (bool, string) {
-	// Check path length (Windows has a default limit of 260 chars)
 	if len(path) > 259 {
 		return false, "The path is too long (max 259 characters)."
 	}
 
-	// Extract the base name of the file/directory
 	baseName := filepath.Base(path)
 
 	// Check for invalid characters in the base name.
@@ -777,7 +752,6 @@ func IsPathValid(path string) (bool, string) {
 	return true, ""
 }
 
-// GenerateSalt generates a random salt of the specified length.
 func GenerateSalt(length int) ([]byte, error) {
 	salt := make([]byte, length)
 	_, err := rand.Read(salt)
@@ -787,7 +761,6 @@ func GenerateSalt(length int) ([]byte, error) {
 	return salt, nil
 }
 
-// GenerateIV generates a random IV of the specified length.
 func GenerateIV(length int) ([]byte, error) {
 	iv := make([]byte, length)
 	_, err := rand.Read(iv)

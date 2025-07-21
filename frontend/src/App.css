@@ -61,7 +61,6 @@ a:active {
     font-weight: bold;
 }
 
-/* Drop Zone View */
 .drop-zone {
     display: flex;
     flex-direction: column;
@@ -126,7 +125,6 @@ a:active {
     border-color: var(--primary-color);
 }
 
-/* From Uiverse.io by neerajbaniwal */ 
 .btn-shine {
   color: #fff;
   background: linear-gradient(to right, #9f9f9f 0, #fff 10%, #868686 20%);
@@ -184,7 +182,6 @@ a:active {
 }
 
 
-/* File Selected View */
 .file-view {
     display: flex;
     flex-direction: column;
@@ -272,7 +269,7 @@ a:active {
 }
 
 .password-wrapper .input-field {
-    padding-right: 40px; /* Make space for the eye icon */
+    padding-right: 40px;
 }
 
 .password-eye {

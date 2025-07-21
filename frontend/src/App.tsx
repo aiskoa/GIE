@@ -6,7 +6,6 @@ import fileIcons from './assets/file-icons.json';
 import logo from './assets/images/logo.png';
 import folderIcon from './assets/images/folder.svg';
 
-// Helper to clean up file paths that might have prefixes
 const normalizePath = (path: string): string => {
     if (path.startsWith('file://')) {
         return path.substring(7);
@@ -58,7 +57,7 @@ function App() {
         } else {
             setIsEncryptedFile(false);
             setHint('');
-            setChannel(50); // Reset channel to default for new files
+            setChannel(50);
         }
     };
 
@@ -151,7 +150,6 @@ function App() {
                 onDrop={(e) => { 
                     e.preventDefault(); 
                     setIsDragOver(false); 
-                    // The OnFileDrop in useEffect will handle the dropped files
                 }}
             >
                 <div className="drop-icon">↓</div>

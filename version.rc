@@ -16,10 +16,10 @@ VSVersionInfo(
         u'040904b0',
         [StringStruct(u'CompanyName', u'AISKOA'),
         StringStruct(u'ProductName', u'GIE'),
-        StringStruct(u'ProductVersion', u'2.1.4'),
+        StringStruct(u'ProductVersion', u'2.1.5'),
         StringStruct(u'InternalName', u'GIE'),
         StringStruct(u'OriginalFilename', u'GIE.exe'),
-        StringStruct(u'FileVersion', u'1.2.4.0'),
+        StringStruct(u'FileVersion', u'1.2.5'),
         StringStruct(u'FileDescription', u'Encrypt and Decrypt Your Files Easily.'),
         StringStruct(u'LegalCopyright', u'AISKOA'),
         ])
