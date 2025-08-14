@@ -3,769 +3,1215 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"time"
+	"sync"
+
+	"gie/internal/config"
+	"gie/internal/crypto"
+	"gie/internal/file"
+	"gie/internal/logging"
+	"gie/internal/operation"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // App struct
 type App struct {
-	ctx context.Context
+	ctx              context.Context
+	settings         *config.Settings
+	currentOperation *operation.Operation
+	operationMutex   sync.RWMutex
+	// Add a counter to track decrypt attempts for debugging
+	decryptAttempts map[string]int
+	attemptsMutex   sync.RWMutex
+}
+
+// ProgressCallback represents a progress update
+type ProgressCallback struct {
+	BytesProcessed int64
+	TotalBytes     int64
+	Percentage     float64
+	Stage          string
 }
 
 func NewApp() *App {
-	return &App{}
-}
+	settings, _ := config.LoadSettings()
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-	fmt.Printf("DEBUG: Registering OnFileDrop handler.\n")
-	runtime.OnFileDrop(ctx, func(x, y int, paths []string) {
-		fmt.Printf("DEBUG: OnFileDrop triggered in Go backend. X: %d, Y: %d, Paths: %v\n", x, y, paths)
-		if len(paths) > 0 {
-			fmt.Printf("DEBUG: Emitting wails:drag:drop event with paths: %v\n", paths)
-			runtime.EventsEmit(ctx, "wails:drag:drop", paths)
-		} else {
-			fmt.Printf("DEBUG: No paths received in OnFileDrop event.\n")
-		}
-	})
+	// Initialize logging system
+	if err := logging.InitLogger(); err != nil {
+		fmt.Printf("Warning: Failed to initialize logging: %v\n", err)
+	}
 
-	if len(os.Args) > 1 {
-		filePath := os.Args[1]
-		fmt.Printf("DEBUG: Application launched with argument: %s\n", filePath)
-
-		if strings.HasSuffix(strings.ToLower(filePath), ".gie") {
-
-			runtime.EventsEmit(ctx, "wails:open:gie", filePath)
-			fmt.Printf("DEBUG: Emitted wails:open:gie event for file: %s\n", filePath)
-		} else {
-			fmt.Printf("DEBUG: Passed file is not a .gie file: %s\n", filePath)
-		}
+	return &App{
+		settings:        settings,
+		decryptAttempts: make(map[string]int),
 	}
 }
 
-func (a *App) SelectFile() (string, error) {
-	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Select File",
-	})
+// OnStartup is called when the app starts up
+func (a *App) OnStartup(ctx context.Context) {
+	a.ctx = ctx
+	logging.LogInfo("Application started")
 }
 
+// OnDomReady is called after front-end resources have been loaded
+func (a *App) OnDomReady(ctx context.Context) {
+	// Here you can call the frontend
+}
+
+// OnBeforeClose is called when the application is about to quit,
+// either by clicking the window close button or calling runtime.Quit.
+// Returning true will cause the application to continue, false will continue shutdown as normal.
+func (a *App) OnBeforeClose(ctx context.Context) (prevent bool) {
+	return false
+}
+
+// OnShutdown is called when the application is shutting down
+func (a *App) OnShutdown(ctx context.Context) {
+	logging.LogInfo("Application shutting down")
+}
+
+// GetSettings returns the current settings
+func (a *App) GetSettings() *config.Settings {
+	return a.settings
+}
+
+// UpdateSettings updates the settings
+func (a *App) UpdateSettings(settings *config.Settings) error {
+	a.settings = settings
+	return config.SaveSettings(settings)
+}
+
+// IsDirectory checks if the given path is a directory
+func (a *App) IsDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
+// FileMetadata represents metadata from an encrypted file
+type FileMetadata struct {
+	Hint            string `json:"hint"`
+	EncryptionLevel string `json:"encryptionLevel"`
+	Channel         int    `json:"channel"`
+	Method          string `json:"method"`
+	OriginalExt     string `json:"originalExt"`
+}
+
+// GetFileMetadata returns complete metadata from an encrypted file
+func (a *App) GetFileMetadata(inputFile string) *FileMetadata {
+	inFile, err := os.Open(inputFile)
+	if err != nil {
+		return nil
+	}
+	defer inFile.Close()
+
+	// Read hint
+	var hintLen uint16
+	err = binary.Read(inFile, binary.BigEndian, &hintLen)
+	if err != nil {
+		return nil
+	}
+
+	var hint string
+	if hintLen > 0 {
+		hintBytes := make([]byte, hintLen)
+		_, err = inFile.Read(hintBytes)
+		if err != nil {
+			return nil
+		}
+		hint = string(hintBytes)
+	}
+
+	// Read method code
+	var methodCode byte
+	err = binary.Read(inFile, binary.BigEndian, &methodCode)
+	if err != nil {
+		return nil
+	}
+
+	// Read channel as uint16 (new format)
+	var channel uint16
+	err = binary.Read(inFile, binary.BigEndian, &channel)
+	if err != nil {
+		return nil
+	}
+
+	// Read encryption level
+	var levelCode byte
+	err = binary.Read(inFile, binary.BigEndian, &levelCode)
+	if err != nil {
+		return nil
+	}
+
+	// Try to read original file extension (new format)
+	var originalExt string
+	var originalExtLen uint16
+	err = binary.Read(inFile, binary.BigEndian, &originalExtLen)
+	if err == nil && originalExtLen > 0 {
+		originalExtBytes := make([]byte, originalExtLen)
+		_, err = inFile.Read(originalExtBytes)
+		if err == nil {
+			originalExt = string(originalExtBytes)
+		}
+	}
+
+	// Convert codes to readable values
+	method := crypto.GetMethodFromCode(methodCode)
+	levelName := crypto.EncryptionLevelCodesReverse[levelCode]
+	if levelName == "" {
+		levelName = "Normal"
+	}
+
+	return &FileMetadata{
+		Hint:            hint,
+		EncryptionLevel: levelName,
+		Channel:         int(channel),
+		Method:          string(method),
+		OriginalExt:     originalExt, // Include original extension in metadata
+	}
+}
+
+// GetHint returns the hint from an encrypted file (backward compatibility)
+func (a *App) GetHint(inputFile string) string {
+	metadata := a.GetFileMetadata(inputFile)
+	if metadata == nil {
+		return ""
+	}
+	return metadata.Hint
+}
+
+// emitProgress emits progress updates to the frontend
+func (a *App) emitProgress(bytesProcessed, totalBytes int64, stage string) {
+	percentage := float64(bytesProcessed) / float64(totalBytes) * 100
+	if percentage > 100 {
+		percentage = 100
+	}
+
+	progress := ProgressCallback{
+		BytesProcessed: bytesProcessed,
+		TotalBytes:     totalBytes,
+		Percentage:     percentage,
+		Stage:          stage,
+	}
+
+	runtime.EventsEmit(a.ctx, "encryption:progress", progress)
+}
+
+// Constants for encryption
 const (
-	LargeFileThreshold = 10 * 1024 * 1024 // 10 MB - Force streaming for testing
-	ChunkSize          = 1024 * 1024      // 1 MB
-	CTRIVSize          = 16               // AES-CTR IV size
-	HMACSize           = 32               // SHA256 HMAC size
+	ChunkSize = 1024 * 1024 // 1MB chunks
 )
 
-type EncryptionLevel struct {
-	Iterations int
-	KeyLength  int
-}
+func (a *App) EncryptFile(inputFile string, password string, hint string, encryptionLevel string, channel int, encryptionMethod string, deleteOriginal bool) string {
+	// Create cancellable operation
+	a.operationMutex.Lock()
+	if a.currentOperation != nil {
+		a.currentOperation.Cancel()
+	}
+	a.currentOperation = operation.NewOperation()
+	a.operationMutex.Unlock()
 
-var EncryptionLevels = map[string]EncryptionLevel{
-	"Low":    {Iterations: 10000, KeyLength: 16},    // AES-128
-	"Normal": {Iterations: 800000, KeyLength: 32},   // AES-256
-	"High":   {Iterations: 12000000, KeyLength: 32}, // AES-256
-}
+	defer func() {
+		a.operationMutex.Lock()
+		a.currentOperation = nil
+		a.operationMutex.Unlock()
+	}()
 
-var EncryptionLevelCodes = map[string]byte{
-	"Low":    0,
-	"Normal": 1,
-	"High":   2,
-}
+	logging.LogInfo("Starting encryption of: %s", inputFile)
 
-var EncryptionLevelCodesReverse = map[byte]string{
-	0: "Low",
-	1: "Normal",
-	2: "High",
-}
-
-func (a *App) EncryptFile(inputFile string, password string, hint string, encryptionLevel string, channel int) string {
 	if password == "" {
 		return "Encryption failed: password cannot be empty."
 	}
+
+	// Get file info for progress tracking
+	fileInfo, err := os.Stat(inputFile)
+	if err != nil {
+		return fmt.Sprintf("error getting file info: %v", err)
+	}
+	totalSize := fileInfo.Size()
+
+	// Convert encryption method string to crypto type
+	method := crypto.EncryptionMethod(encryptionMethod)
+
+	// Get level parameters
+	level := crypto.EncryptionLevels[encryptionLevel]
+	if encryptionLevel == "" {
+		level = crypto.EncryptionLevels["Normal"]
+	}
+
 	passwordBytes := []byte(password)
-	hintBytes := []byte(hint)
+	methodCode := crypto.GetMethodCode(method)
 
-	levelParams, ok := EncryptionLevels[encryptionLevel]
-	if !ok {
-		levelParams = EncryptionLevels["Normal"]
-	}
-	encryptionLevelCode, ok := EncryptionLevelCodes[encryptionLevel]
-	if !ok {
-		encryptionLevelCode = EncryptionLevelCodes["Normal"]
-	}
+	// Create output file name without revealing original extension
+	baseFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
+	outputDir := filepath.Dir(inputFile)
+	outputFile := filepath.Join(outputDir, baseFileName+".gie")
 
-	outputFile := inputFile + ".gie"
-	tempOutputFile := outputFile + ".tmp"
-
-	aesKeySalt, err := GenerateSalt(16)
+	// Generate salts
+	aesKeySalt, err := crypto.GenerateSalt(32)
 	if err != nil {
 		return fmt.Sprintf("error generating AES key salt: %v", err)
 	}
-	hmacKeySalt, err := GenerateSalt(16)
+
+	hmacKeySalt, err := crypto.GenerateSalt(32)
 	if err != nil {
 		return fmt.Sprintf("error generating HMAC key salt: %v", err)
 	}
 
-	aesKey := DeriveKeyFromPassword(passwordBytes, aesKeySalt, levelParams.Iterations, levelParams.KeyLength)
-	hmacKey := DeriveKeyFromPassword(passwordBytes, hmacKeySalt, levelParams.Iterations, levelParams.KeyLength)
+	// Derive keys
+	aesKey, hmacKey := crypto.DeriveKeys(passwordBytes, aesKeySalt, hmacKeySalt, level)
 
-	ctrIV, err := GenerateIV(CTRIVSize)
+	logging.LogInfo("=== ENCRYPTION KEY DERIVATION ===")
+	logging.LogInfo("Password: '%s' (length: %d)", password, len(password))
+	logging.LogInfo("Password bytes: %x", passwordBytes)
+	logging.LogInfo("Level: %s (iterations: %d)", encryptionLevel, level.Iterations)
+	logging.LogInfo("Channel: %d", channel)
+	logging.LogInfo("AES salt (full): %x", aesKeySalt)
+	logging.LogInfo("HMAC salt (full): %x", hmacKeySalt)
+	logging.LogInfo("Derived AES key (full): %x", aesKey)
+	logging.LogInfo("Derived HMAC key (full): %x", hmacKey)
+
+	// Create encryptor
+	ivSize := 16 // AES-CTR IV size
+
+	iv, err := crypto.GenerateIV(ivSize)
 	if err != nil {
-		return fmt.Sprintf("error generating CTR IV: %v", err)
+		return fmt.Sprintf("error generating IV: %v", err)
 	}
 
+	encryptor, err := crypto.CreateEncryptor(method, aesKey, iv)
+	if err != nil {
+		return fmt.Sprintf("error creating encryptor: %v", err)
+	}
+
+	// Open input file and get size for progress tracking
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error opening input file: %v", err)
 	}
 	defer inFile.Close()
 
-	// Crea el archivo temporal antes de crear el archio encriptado final bue pensaba hacer otro tipo de validacion pero esto es mejor
-	outFile, err := os.Create(tempOutputFile)
+	// Create output file
+	outFile, err := os.Create(outputFile)
 	if err != nil {
-		return fmt.Sprintf("error creating temporary output file: %v", err)
+		return fmt.Sprintf("error creating output file: %v", err)
 	}
+	defer outFile.Close()
 
-	defer func() {
-		if r := recover(); r != nil {
-			os.Remove(tempOutputFile)
-			panic(r)
-		}
-	}()
+	// Get original file extension
+	originalExt := filepath.Ext(inputFile)
+	originalExtBytes := []byte(originalExt)
+	originalExtLen := uint16(len(originalExtBytes))
 
+	// Prepare metadata
 	var metadataBuffer bytes.Buffer
+	hintBytes := []byte(hint)
+	hintLen := uint16(len(hintBytes))
 
-	err = binary.Write(&metadataBuffer, binary.BigEndian, uint16(len(hintBytes)))
-	if err != nil {
-		return fmt.Sprintf("error writing hint length to buffer: %v", err)
-	}
-	_, err = metadataBuffer.Write(hintBytes)
-	if err != nil {
-		return fmt.Sprintf("error writing hint to buffer: %v", err)
-	}
-	err = binary.Write(&metadataBuffer, binary.BigEndian, uint16(channel))
-	if err != nil {
-		return fmt.Sprintf("error writing channel to buffer: %v", err)
-	}
-	err = binary.Write(&metadataBuffer, binary.BigEndian, encryptionLevelCode)
-	if err != nil {
-		return fmt.Sprintf("error writing encryption level code to buffer: %v", err)
-	}
-	_, err = metadataBuffer.Write(aesKeySalt)
-	if err != nil {
-		return fmt.Sprintf("error writing AES key salt to buffer: %v", err)
-	}
-	_, err = metadataBuffer.Write(hmacKeySalt)
-	if err != nil {
-		return fmt.Sprintf("error writing HMAC key salt to buffer: %v", err)
-	}
-	_, err = metadataBuffer.Write(ctrIV)
-	if err != nil {
-		return fmt.Sprintf("error writing CTR IV to buffer: %v", err)
+	// Get encryption level code
+	levelCode := crypto.EncryptionLevelCodes[encryptionLevel]
+	if encryptionLevel == "" {
+		levelCode = crypto.EncryptionLevelCodes["Normal"]
 	}
 
-	// Write metadata from buffer to output file
+	binary.Write(&metadataBuffer, binary.BigEndian, hintLen)
+	metadataBuffer.Write(hintBytes)
+	metadataBuffer.Write([]byte{methodCode})
+	binary.Write(&metadataBuffer, binary.BigEndian, uint16(channel))
+	metadataBuffer.Write([]byte{levelCode})
+	binary.Write(&metadataBuffer, binary.BigEndian, originalExtLen)
+	metadataBuffer.Write(originalExtBytes)
+	metadataBuffer.Write(aesKeySalt)
+	metadataBuffer.Write(hmacKeySalt)
+	metadataBuffer.Write(iv)
+
+	logging.LogInfo("Original extension saved: '%s'", originalExt)
+
+	// Write metadata to file
 	_, err = outFile.Write(metadataBuffer.Bytes())
 	if err != nil {
-		return fmt.Sprintf("error writing metadata to output file: %v", err)
+		return fmt.Sprintf("error writing metadata: %v", err)
 	}
 
 	// Initialize HMAC and feed it the metadata
 	hmacHasher := hmac.New(sha256.New, hmacKey)
 	hmacHasher.Write(metadataBuffer.Bytes())
 
-	// Initialize AES cipher for CTR mode
-	block, err := aes.NewCipher(aesKey)
-	if err != nil {
-		return fmt.Sprintf("error creating AES cipher: %v", err)
-	}
-	stream := cipher.NewCTR(block, ctrIV)
-
-	// Create a MultiWriter to write to both outFile and hmacHasher
-	// This ensures HMAC is calculated over the ciphertext as it's written
+	// Create a multi-writer to write to both file and HMAC
 	multiWriter := io.MultiWriter(outFile, hmacHasher)
 
-	// Encrypt and write data in chunks
+	// Encrypt data in chunks
 	buf := make([]byte, ChunkSize)
+	var bytesProcessed int64 = 0
+
 	for {
+		// Check for cancellation before processing each chunk
+		a.operationMutex.RLock()
+		if a.currentOperation != nil && a.currentOperation.IsCancelled() {
+			a.operationMutex.RUnlock()
+			logging.LogInfo("Encryption cancelled by user for: %s", inputFile)
+
+			// Clean up output file
+			outFile.Close()
+			if err := file.SecureDelete(outputFile); err != nil {
+				logging.LogWarning("Failed to securely delete output file after cancellation: %v", err)
+			}
+
+			return "Operation cancelled by user"
+		}
+		a.operationMutex.RUnlock()
+
 		n, err := inFile.Read(buf)
 		if n == 0 {
 			break
 		}
 		if err != nil && err != io.EOF {
-			return fmt.Sprintf("error reading input file chunk: %v", err)
+			return fmt.Sprintf("error reading input file: %v", err)
 		}
 
-		encryptedChunk := make([]byte, n)
-		stream.XORKeyStream(encryptedChunk, buf[:n])
+		// Emit progress before encryption
+		a.emitProgress(bytesProcessed, totalSize, "Encrypting...")
+
+		encryptedChunk, err := encryptor.Encrypt(buf[:n])
+		if err != nil {
+			return fmt.Sprintf("error encrypting chunk: %v", err)
+		}
 
 		_, err = multiWriter.Write(encryptedChunk)
 		if err != nil {
 			return fmt.Sprintf("error writing encrypted chunk: %v", err)
 		}
-	}
-	inFile.Close()
 
-	hmacTag := hmacHasher.Sum(nil)
-	_, err = outFile.Write(hmacTag)
-	if err != nil {
-		return fmt.Sprintf("error writing HMAC tag: %v", err)
+		bytesProcessed += int64(n)
+
+		// Emit progress after encryption
+		a.emitProgress(bytesProcessed, totalSize, "Encrypting...")
 	}
-	outFile.Sync()
+
+	// Write HMAC
+	hmacSum := hmacHasher.Sum(nil)
+	_, err = outFile.Write(hmacSum)
+	if err != nil {
+		return fmt.Sprintf("error writing HMAC: %v", err)
+	}
+
+	// Close files
+	inFile.Close()
 	outFile.Close()
 
-	// Verification Step (decrypt the temporary file and verify HMAC)
-	fmt.Printf("DEBUG: Starting verification of %s\n", tempOutputFile)
-	verificationResult := a.DecryptFile(tempOutputFile, string(password), true, channel)
-	fmt.Printf("DEBUG: Verification of %s finished with result: %s\n", tempOutputFile, verificationResult)
-	if verificationResult != "success" {
-		os.Remove(tempOutputFile)
-		return fmt.Sprintf("encryption verification failed: %s", verificationResult)
-	}
-
-	fmt.Printf("DEBUG: Verification successful. Attempting to rename %s to %s\n", tempOutputFile, outputFile)
-	time.Sleep(500 * time.Millisecond)
-
-	maxRetries := 10
-	retryDelay := 200 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		err = os.Rename(tempOutputFile, outputFile)
-		if err == nil {
-			fmt.Printf("DEBUG: Successfully renamed %s to %s\n", tempOutputFile, outputFile)
-			break
+	// Delete original file if requested
+	if deleteOriginal {
+		if err := file.SecureDelete(inputFile); err != nil {
+			logging.LogWarning("Failed to securely delete original file: %v", err)
+			return fmt.Sprintf("Encryption completed, but failed to delete original file: %v", err)
 		}
-		fmt.Printf("DEBUG: Rename attempt %d for %s failed: %v. Retrying...\n", i+1, tempOutputFile, err)
-		if i == maxRetries-1 {
-			return fmt.Sprintf("error renaming temporary file after multiple retries: %v", err)
-		}
-		time.Sleep(retryDelay)
+		logging.LogInfo("Original file securely deleted: %s", inputFile)
 	}
 
-	if err != nil {
-		os.Remove(tempOutputFile)
-		return fmt.Sprintf("error renaming temporary file: %v", err)
+	logging.LogInfo("Encryption completed successfully: %s", outputFile)
+
+	// Show success notification
+	fileName := filepath.Base(strings.TrimSuffix(outputFile, ".gie"))
+	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+		"type":     "success",
+		"title":    "Encryption Completed",
+		"message":  fmt.Sprintf("File '%s' has been encrypted successfully", fileName),
+		"duration": 5000,
+	})
+
+	// Only restore the level to default, keep the user's channel for convenience
+	if a.settings != nil {
+		currentTheme := a.settings.Theme
+		currentChannel := a.settings.LastUsedChannel // Keep user's channel
+		a.settings.LastUsedLevel = "Normal"          // Reset level to default
+		a.settings.Theme = currentTheme
+
+		logging.LogInfo("Settings partially restored - Channel: %d (kept), Level: Normal (reset), Theme: %s",
+			currentChannel, currentTheme)
+
+		config.SaveSettings(a.settings)
 	}
 
-	fmt.Printf("DEBUG: Renaming successful. Attempting to delete original input file %s\n", inputFile)
-	time.Sleep(100 * time.Millisecond)
-
-	fileToDelete := inputFile + ".todelete"
-	renErr := os.Rename(inputFile, fileToDelete)
-	if renErr != nil {
-		fmt.Printf("WARNING: Could not rename original file %s for deletion: %v\n", inputFile, renErr)
-	} else {
-		maxRetriesRemove := 10
-		retryDelayRemove := 200 * time.Millisecond
-
-		for i := 0; i < maxRetriesRemove; i++ {
-			removeErr := os.Remove(fileToDelete)
-			if removeErr == nil {
-				break
-			}
-			if i == maxRetriesRemove-1 {
-				fmt.Printf("WARNING: Could not delete original file %s after multiple retries: %v\n", fileToDelete, removeErr)
-			}
-			time.Sleep(retryDelayRemove)
-		}
-	}
 	return "success"
 }
 
-// DecryptFile decrypts a single .gie file using AES-CTR and HMAC-SHA256.
-func (a *App) DecryptFile(inputFile string, password string, verifyMode bool, expectedChannel int) string {
-	passwordBytes := []byte(password)
-	// Open input file
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Sprintf("error opening file: %v", err)
+func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) string {
+	// Auto-detect only the encryption level (channel remains as user's second password)
+	if !verifyMode {
+		metadata := a.GetFileMetadata(inputFile)
+		if metadata != nil {
+			// Only update the encryption level automatically, keep user's channel
+			currentChannel := a.settings.LastUsedChannel
+			a.UpdateChannelAndLevel(currentChannel, metadata.EncryptionLevel)
+			logging.LogInfo("Auto-detected encryption level: %s (user channel: %d)", metadata.EncryptionLevel, currentChannel)
+		}
 	}
-	defer inFile.Close()
+	// Create cancellable operation (only for non-verify mode)
+	if !verifyMode {
+		a.operationMutex.Lock()
+		if a.currentOperation != nil {
+			a.currentOperation.Cancel()
+		}
+		a.currentOperation = operation.NewOperation()
+		a.operationMutex.Unlock()
 
-	fileInfo, err := inFile.Stat()
+		defer func() {
+			a.operationMutex.Lock()
+			a.currentOperation = nil
+			a.operationMutex.Unlock()
+		}()
+	}
+
+	logging.LogInfo("Starting decryption of: %s", inputFile)
+
+	if password == "" {
+		return "Decryption failed: password cannot be empty."
+	}
+
+	// Get file size for progress tracking first (before opening file)
+	fileInfo, err := os.Stat(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error getting file info: %v", err)
 	}
-	fmt.Printf("DEBUG: DecryptFile - File size: %d bytes\n", fileInfo.Size())
+	totalSize := fileInfo.Size()
 
-	// Create a buffer to capture metadata for HMAC calculation during decryption
+	// Open input file fresh for each operation
+	inFile, err := os.Open(inputFile)
+	if err != nil {
+		return fmt.Sprintf("error opening input file: %v", err)
+	}
+	defer inFile.Close()
+
+	// Ensure we start from the beginning of the file
+	_, err = inFile.Seek(0, io.SeekStart)
+	if err != nil {
+		return fmt.Sprintf("error seeking to start of file: %v", err)
+	}
+
+	// Read metadata with a fresh buffer for each operation
 	var metadataBuffer bytes.Buffer
 	metadataReader := io.TeeReader(inFile, &metadataBuffer)
 
-	// Read metadata using metadataReader
 	var hintLen uint16
 	err = binary.Read(metadataReader, binary.BigEndian, &hintLen)
 	if err != nil {
 		return fmt.Sprintf("error reading hint length: %v", err)
 	}
+
 	hintBytes := make([]byte, hintLen)
-	_, err = io.ReadFull(metadataReader, hintBytes)
+	_, err = metadataReader.Read(hintBytes)
 	if err != nil {
 		return fmt.Sprintf("error reading hint: %v", err)
 	}
 
-	var fileChannel uint16
-	err = binary.Read(metadataReader, binary.BigEndian, &fileChannel)
+	var methodCode byte
+	err = binary.Read(metadataReader, binary.BigEndian, &methodCode)
 	if err != nil {
-		return fmt.Sprintf("error reading file channel: %v", err)
+		return fmt.Sprintf("error reading method code: %v", err)
 	}
 
-	var fileEncryptionLevelCode byte
-	err = binary.Read(metadataReader, binary.BigEndian, &fileEncryptionLevelCode)
+	// Read channel as uint16 (new format)
+	var channel uint16
+	err = binary.Read(metadataReader, binary.BigEndian, &channel)
 	if err != nil {
-		return fmt.Sprintf("error reading encryption level code: %v", err)
+		return fmt.Sprintf("error reading channel: %v", err)
 	}
 
-	aesKeySalt := make([]byte, 16)
-	_, err = io.ReadFull(metadataReader, aesKeySalt)
+	var levelCode byte
+	err = binary.Read(metadataReader, binary.BigEndian, &levelCode)
+	if err != nil {
+		return fmt.Sprintf("error reading encryption level: %v", err)
+	}
+
+	// Read original file extension
+	var originalExtLen uint16
+	err = binary.Read(metadataReader, binary.BigEndian, &originalExtLen)
+	if err != nil {
+		return fmt.Sprintf("error reading original extension length: %v", err)
+	}
+
+	var originalExt string
+	if originalExtLen > 0 {
+		originalExtBytes := make([]byte, originalExtLen)
+		_, err = metadataReader.Read(originalExtBytes)
+		if err != nil {
+			return fmt.Sprintf("error reading original extension: %v", err)
+		}
+		originalExt = string(originalExtBytes)
+	}
+
+	logging.LogInfo("Read metadata - Channel: %d, Level: %d, Original extension: '%s'", channel, levelCode, originalExt)
+
+	aesKeySalt := make([]byte, 32)
+	_, err = metadataReader.Read(aesKeySalt)
 	if err != nil {
 		return fmt.Sprintf("error reading AES key salt: %v", err)
 	}
-	hmacKeySalt := make([]byte, 16)
-	_, err = io.ReadFull(metadataReader, hmacKeySalt)
+
+	hmacKeySalt := make([]byte, 32)
+	_, err = metadataReader.Read(hmacKeySalt)
 	if err != nil {
 		return fmt.Sprintf("error reading HMAC key salt: %v", err)
 	}
-	ctrIV := make([]byte, CTRIVSize)
-	_, err = io.ReadFull(metadataReader, ctrIV)
+
+	// Determine IV size based on method
+	method := crypto.GetMethodFromCode(methodCode)
+	ivSize := 16 // AES-CTR IV size
+
+	iv := make([]byte, ivSize)
+	_, err = metadataReader.Read(iv)
 	if err != nil {
-		return fmt.Sprintf("error reading CTR IV: %v", err)
+		return fmt.Sprintf("error reading IV: %v", err)
 	}
 
-	fmt.Printf("DEBUG: DecryptFile - Metadata length: %d bytes\n", metadataBuffer.Len())
+	// Validate channel - the file's channel must match the user's current channel setting
+	logging.LogInfo("Channel validation - File channel: %d, User channel: %d", int(channel), a.settings.LastUsedChannel)
 
-	// Verify channel
-	if int(fileChannel) != expectedChannel {
-		return "incorrect channel. Please ensure you are using the correct channel for this file."
+	if int(channel) != a.settings.LastUsedChannel {
+		logging.LogInfo("Channel mismatch detected - rejecting decryption")
+
+		// Show error notification for incorrect channel
+		fileName := filepath.Base(inputFile)
+		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+			"type":     "error",
+			"title":    "Decryption Failed",
+			"message":  fmt.Sprintf("Incorrect channel for file '%s'. Please check your channel setting.", fileName),
+			"duration": 8000,
+		})
+
+		// Clear decrypt attempts counter on failure
+		a.attemptsMutex.Lock()
+		delete(a.decryptAttempts, inputFile)
+		a.attemptsMutex.Unlock()
+		return "Invalid password or channel."
 	}
 
-	// Derive keys
-	encryptionLevelName, ok := EncryptionLevelCodesReverse[fileEncryptionLevelCode]
-	if !ok {
-		encryptionLevelName = "Normal"
+	logging.LogInfo("Channel validation passed - proceeding with decryption")
+
+	// Calculate ciphertext start position and length
+	metadataSize := int64(metadataBuffer.Len())
+	hmacSize := int64(32) // SHA-256 HMAC size
+	ciphertextLength := totalSize - metadataSize - hmacSize
+	ciphertextStartPos := metadataSize
+
+	// Derive keys using the encryption level from file metadata
+	passwordBytes := []byte(password)
+	levelName := crypto.EncryptionLevelCodesReverse[levelCode]
+	if levelName == "" {
+		levelName = "Normal" // Fallback to Normal if level code is invalid
 	}
-	levelParams := EncryptionLevels[encryptionLevelName]
-	aesKey := DeriveKeyFromPassword(passwordBytes, aesKeySalt, levelParams.Iterations, levelParams.KeyLength)
-	hmacKey := DeriveKeyFromPassword(passwordBytes, hmacKeySalt, levelParams.Iterations, levelParams.KeyLength)
+	level := crypto.EncryptionLevels[levelName]
 
-	// Calculate the size of the ciphertext (total file size - metadata size - HMAC tag size)
-	// metadataBuffer.Len() gives the size of the metadata that was read into the buffer
-	ciphertextStartPos := int64(metadataBuffer.Len())
-	ciphertextEndPos := fileInfo.Size() - HMACSize
-	ciphertextLength := ciphertextEndPos - ciphertextStartPos
+	logging.LogInfo("=== KEY DERIVATION DEBUG ===")
+	logging.LogInfo("Password: '%s' (length: %d)", password, len(password))
+	logging.LogInfo("Password bytes: %x", passwordBytes)
+	logging.LogInfo("Level code from file: %d", levelCode)
+	logging.LogInfo("Level name: %s", levelName)
+	logging.LogInfo("Level iterations: %d", level.Iterations)
+	logging.LogInfo("AES salt (full): %x", aesKeySalt)
+	logging.LogInfo("HMAC salt (full): %x", hmacKeySalt)
 
-	fmt.Printf("DEBUG: DecryptFile - Ciphertext start: %d, end: %d, length: %d\n", ciphertextStartPos, ciphertextEndPos, ciphertextLength)
+	aesKey, hmacKey := crypto.DeriveKeys(passwordBytes, aesKeySalt, hmacKeySalt, level)
+
+	logging.LogInfo("Derived AES key (full): %x", aesKey)
+	logging.LogInfo("Derived HMAC key (full): %x", hmacKey)
 
 	// Initialize HMAC and feed it the metadata
 	hmacHasher := hmac.New(sha256.New, hmacKey)
-	hmacHasher.Write(metadataBuffer.Bytes()) // Feed metadata to HMAC
+	hmacHasher.Write(metadataBuffer.Bytes())
 
-	// Feed ciphertext to HMAC
-	// Create a limited reader for the ciphertext part of the file
-	// IMPORTANT: The inFile's current position is already at ciphertextStartPos due to TeeReader.
-	// So, we can just use io.LimitReader directly on inFile for HMAC calculation.
-	currentPos, _ := inFile.Seek(0, io.SeekCurrent)
-	fmt.Printf("DEBUG: DecryptFile - Before HMAC copy, inFile current pos: %d\n", currentPos)
+	// Read and verify HMAC
+	hmacPos := ciphertextStartPos + ciphertextLength
+	_, err = inFile.Seek(hmacPos, io.SeekStart)
+	if err != nil {
+		return fmt.Sprintf("error seeking to HMAC: %v", err)
+	}
 
-	// Create a buffer to read chunks from the file
-	buf := make([]byte, ChunkSize)
-	var totalBytesRead int64
+	storedHmac := make([]byte, 32)
+	_, err = inFile.Read(storedHmac)
+	if err != nil {
+		return fmt.Sprintf("error reading stored HMAC: %v", err)
+	}
 
-	for totalBytesRead < ciphertextLength {
-		bytesToRead := ChunkSize
-		if remaining := ciphertextLength - totalBytesRead; remaining < int64(ChunkSize) {
-			bytesToRead = int(remaining)
+	// Read ciphertext for HMAC verification
+	_, err = inFile.Seek(ciphertextStartPos, io.SeekStart)
+	if err != nil {
+		return fmt.Sprintf("error seeking to ciphertext for HMAC verification: %v", err)
+	}
+
+	hmacBuffer := make([]byte, 8192)
+	var hmacBytesRead int64 = 0
+	for hmacBytesRead < ciphertextLength {
+		toRead := int64(len(hmacBuffer))
+		if hmacBytesRead+toRead > ciphertextLength {
+			toRead = ciphertextLength - hmacBytesRead
 		}
 
-		n, err := inFile.Read(buf[:bytesToRead])
+		n, err := inFile.Read(hmacBuffer[:toRead])
+		if err != nil && err != io.EOF {
+			return fmt.Sprintf("error reading ciphertext for HMAC: %v", err)
+		}
 		if n == 0 {
 			break
 		}
-		if err != nil && err != io.EOF {
-			return fmt.Sprintf("error reading ciphertext chunk for HMAC: %v", err)
-		}
 
-		hmacHasher.Write(buf[:n])
-		totalBytesRead += int64(n)
-	}
-	fmt.Printf("DEBUG: DecryptFile - Total bytes fed to HMAC: %d\n", totalBytesRead)
-
-	// Read expected HMAC tag from file
-	expectedHMAC := make([]byte, HMACSize)
-	// The current position of inFile is now at ciphertextEndPos (after reading ciphertext for HMAC)
-	currentPos, _ = inFile.Seek(0, io.SeekCurrent)
-	fmt.Printf("DEBUG: DecryptFile - Before reading HMAC tag, inFile current pos: %d\n", currentPos)
-	_, err = io.ReadFull(inFile, expectedHMAC)
-	if err != nil {
-		return fmt.Sprintf("error reading HMAC tag: %v", err)
+		hmacHasher.Write(hmacBuffer[:n])
+		hmacBytesRead += int64(n)
 	}
 
-	// Verify HMAC
-	if !hmac.Equal(hmacHasher.Sum(nil), expectedHMAC) {
-		return "HMAC verification failed: data may be corrupted or password incorrect"
+	computedHmac := hmacHasher.Sum(nil)
+
+	logging.LogInfo("=== HMAC VERIFICATION DEBUG ===")
+	logging.LogInfo("Stored HMAC: %x", storedHmac[:16])
+	logging.LogInfo("Computed HMAC: %x", computedHmac[:16])
+	logging.LogInfo("HMAC match: %v", hmac.Equal(storedHmac, computedHmac))
+	logging.LogInfo("Metadata size: %d bytes", metadataBuffer.Len())
+	logging.LogInfo("Ciphertext length: %d bytes", ciphertextLength)
+
+	if !hmac.Equal(storedHmac, computedHmac) {
+		logging.LogInfo("=== HMAC MISMATCH - DECRYPTION FAILED ===")
+
+		// Show error notification for incorrect password
+		fileName := filepath.Base(inputFile)
+		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+			"type":     "error",
+			"title":    "Decryption Failed",
+			"message":  fmt.Sprintf("Incorrect password for file '%s'. Please check your password.", fileName),
+			"duration": 8000,
+		})
+
+		return "Invalid password or channel."
 	}
 
-	// If HMAC is valid, proceed with decryption
-	// Seek back to the beginning of the ciphertext for decryption
-	// This seek is necessary because io.Copy advanced the inFile's position.
+	logging.LogInfo("=== HMAC VERIFIED - PROCEEDING WITH DECRYPTION ===")
+
+	// If this is just verification mode, return success
+	if verifyMode {
+		return "success"
+	}
+
+	// Proceed with decryption
 	_, err = inFile.Seek(ciphertextStartPos, io.SeekStart)
 	if err != nil {
 		return fmt.Sprintf("error seeking to ciphertext for decryption: %v", err)
 	}
-	currentPos, _ = inFile.Seek(0, io.SeekCurrent)
-	fmt.Printf("DEBUG: DecryptFile - After seeking for decryption, inFile current pos: %d\n", currentPos)
 
-	// Initialize AES cipher for CTR mode
-	block, err := aes.NewCipher(aesKey)
+	// Create a fresh decryptor for each operation to avoid state issues
+	decryptor, err := crypto.CreateEncryptor(method, aesKey, iv)
 	if err != nil {
-		return fmt.Sprintf("error creating AES cipher: %v", err)
+		return fmt.Sprintf("error creating decryptor: %v", err)
 	}
-	stream := cipher.NewCTR(block, ctrIV)
 
-	// Decrypt and write data in chunks
-	// Use a LimitReader to ensure we only read the ciphertext part
-	limitedReader := io.LimitReader(inFile, ciphertextLength)
-	reader := &cipher.StreamReader{S: stream, R: limitedReader}
+	// Prepare output file with original extension restored
+	baseOutputFile := strings.TrimSuffix(inputFile, ".gie")
+	if strings.HasSuffix(baseOutputFile, ".tmp") {
+		baseOutputFile = strings.TrimSuffix(baseOutputFile, ".tmp")
+	}
 
-	// If in verifyMode, write to buffer; otherwise, write to file
-	if verifyMode {
-		// In verify mode, we don't need to store the decrypted data, just read it to verify.
-		_, err = io.Copy(io.Discard, reader)
-		if err != nil {
-			return fmt.Sprintf("error decrypting in verify mode: %v", err)
-		}
+	var finalOutputFile string
+
+	// Restore original extension if available
+	if originalExt != "" {
+		// Remove any existing extension and add the original one
+		baseWithoutExt := strings.TrimSuffix(baseOutputFile, filepath.Ext(baseOutputFile))
+		finalOutputFile = baseWithoutExt + originalExt
+
+		logging.LogInfo("Restoring original extension: %s -> %s", baseOutputFile, finalOutputFile)
 	} else {
-		outputFile := strings.TrimSuffix(inputFile, ".gie")
-		// If the input file already had a .tmp suffix (e.g., from a previous failed encryption),
-		// remove it to get the true original filename.
-		if strings.HasSuffix(outputFile, ".tmp") {
-			outputFile = strings.TrimSuffix(outputFile, ".tmp")
+		// No original extension saved, use base name
+		finalOutputFile = baseOutputFile
+		logging.LogInfo("No original extension found, using: %s", finalOutputFile)
+	}
+
+	// Handle file conflicts
+	counter := 1
+	originalFinalOutputFile := finalOutputFile
+	for {
+		if _, err := os.Stat(finalOutputFile); os.IsNotExist(err) {
+			break
 		}
-		tempOutputFile := outputFile + ".tmp"
-		fmt.Printf("DEBUG: DecryptFile creating temporary output file: %s\n", tempOutputFile)
-		outFile, err := os.Create(tempOutputFile)
-		if err != nil {
-			return fmt.Sprintf("error creating temporary output file: %v", err)
-		}
-		defer outFile.Close()
-		defer os.Remove(tempOutputFile)
+		ext := filepath.Ext(originalFinalOutputFile)
+		nameWithoutExt := strings.TrimSuffix(originalFinalOutputFile, ext)
+		finalOutputFile = fmt.Sprintf("%s (%d)%s", nameWithoutExt, counter, ext)
+		counter++
+	}
 
-		buf := make([]byte, ChunkSize)
-		for {
-			n, err := reader.Read(buf)
-			if n == 0 {
-				break
-			}
-			if err != nil && err != io.EOF {
-				return fmt.Sprintf("error reading decrypted chunk: %v", err)
-			}
-			_, err = outFile.Write(buf[:n])
-			if err != nil {
-				return fmt.Sprintf("error writing decrypted chunk: %v", err)
-			}
-		}
+	tempOutputFile := finalOutputFile + ".tmp"
+	outFile, err := os.Create(tempOutputFile)
+	if err != nil {
+		return fmt.Sprintf("error creating output file: %v", err)
+	}
+	defer outFile.Close()
 
-		outFile.Close()
-		// Close the input file before attempting to delete it
-		inFile.Close()
-		fmt.Printf("DEBUG: Closed input file %s before deletion attempt.\n", inputFile)
+	// Decrypt data in chunks with real progress tracking
+	limitedReader := io.LimitReader(inFile, ciphertextLength)
+	var bytesProcessed int64 = 0
 
-		err = os.Rename(tempOutputFile, outputFile)
-		if err != nil {
-			return fmt.Sprintf("error renaming temporary file: %v", err)
-		}
+	buf := make([]byte, ChunkSize)
+	for {
+		// Check for cancellation before processing each chunk (only for non-verify mode)
+		if !verifyMode {
+			a.operationMutex.RLock()
+			if a.currentOperation != nil && a.currentOperation.IsCancelled() {
+				a.operationMutex.RUnlock()
+				logging.LogInfo("Decryption cancelled by user for: %s", inputFile)
 
-		// Give the OS a moment to release the file handle before attempting to delete the original
-		time.Sleep(100 * time.Millisecond)
-
-		// Attempt to delete the original input file by renaming it first
-		fileToDelete := inputFile + ".todelete"
-		fmt.Printf("DEBUG: Attempting to rename %s to %s for deletion.\n", inputFile, fileToDelete)
-		renErr := os.Rename(inputFile, fileToDelete)
-		if renErr != nil {
-			fmt.Printf("WARNING: Could not rename original .gie file %s for deletion: %v\n", inputFile, renErr)
-		} else {
-			maxRetriesRemove := 10
-			retryDelayRemove := 200 * time.Millisecond // 200ms
-			fmt.Printf("DEBUG: Renamed %s to %s. Attempting to delete.\n", inputFile, fileToDelete)
-
-			for i := 0; i < maxRetriesRemove; i++ {
-				removeErr := os.Remove(fileToDelete)
-				if removeErr == nil {
-					fmt.Printf("DEBUG: Successfully deleted original .gie file: %s\n", fileToDelete)
-					break // Success, exit loop
+				// Clean up temporary files
+				outFile.Close()
+				if err := file.SecureDelete(tempOutputFile); err != nil {
+					logging.LogWarning("Failed to securely delete temp file after cancellation: %v", err)
 				}
-				fmt.Printf("DEBUG: Deletion attempt %d for %s failed: %v. Retrying...\n", i+1, fileToDelete, removeErr)
-				time.Sleep(retryDelayRemove)
+
+				return "Operation cancelled by user"
 			}
+			a.operationMutex.RUnlock()
+		}
+
+		n, err := limitedReader.Read(buf)
+		if n == 0 {
+			break
+		}
+		if err != nil && err != io.EOF {
+			return fmt.Sprintf("error reading encrypted chunk: %v", err)
+		}
+
+		// Emit progress before decryption
+		if !verifyMode {
+			a.emitProgress(bytesProcessed, ciphertextLength, "Decrypting...")
+		}
+
+		decryptedChunk, err := decryptor.Decrypt(buf[:n])
+		if err != nil {
+			return fmt.Sprintf("error decrypting chunk: %v", err)
+		}
+
+		_, err = outFile.Write(decryptedChunk)
+		if err != nil {
+			return fmt.Sprintf("error writing decrypted chunk: %v", err)
+		}
+
+		bytesProcessed += int64(n)
+
+		// Emit progress after processing chunk
+		if !verifyMode {
+			a.emitProgress(bytesProcessed, ciphertextLength, "Decrypting...")
 		}
 	}
+
+	outFile.Close()
+	inFile.Close()
+
+	// Rename temp file to final name
+	err = os.Rename(tempOutputFile, finalOutputFile)
+	if err != nil {
+		return fmt.Sprintf("error finalizing output file: %v", err)
+	}
+
+	// Mark encrypted file for deletion
+	deleteFile := inputFile + ".todelete"
+	err = os.Rename(inputFile, deleteFile)
+	if err != nil {
+		logging.LogWarning("Failed to mark encrypted file for deletion: %v", err)
+	} else {
+		// Delete the marked file
+		if err := file.SecureDelete(deleteFile); err != nil {
+			logging.LogWarning("Failed to securely delete encrypted file: %v", err)
+		}
+	}
+
+	// Clear decrypt attempts counter on success
+	a.attemptsMutex.Lock()
+	delete(a.decryptAttempts, inputFile)
+	a.attemptsMutex.Unlock()
+
+	logging.LogInfo("Decryption completed successfully: %s", finalOutputFile)
+
+	// Show success notification
+	fileName := filepath.Base(finalOutputFile)
+	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+		"type":     "success",
+		"title":    "Decryption Completed",
+		"message":  fmt.Sprintf("File '%s' has been decrypted successfully", fileName),
+		"duration": 5000,
+	})
+
+	// Note: Do not restore settings after decryption - user needs to manually set channel
+	// a.RestoreDefaultSettings()
 
 	return "success"
 }
 
-// Agregar estas funciones al final de app.go, antes de las funciones de utilidad existentes
+// CancelOperation cancels the current operation
+func (a *App) CancelOperation() {
+	a.operationMutex.Lock()
+	defer a.operationMutex.Unlock()
 
-// OpenExternalURL opens a URL in the default browser.
-func (a *App) OpenExternalURL(url string) {
-	runtime.BrowserOpenURL(a.ctx, url)
+	if a.currentOperation != nil {
+		a.currentOperation.Cancel()
+		logging.LogInfo("Operation cancelled by user")
+	}
 }
 
-// SelectDirectory opens a directory dialog to select a directory.
+// GetAvailableEncryptionMethods returns the list of available encryption methods
+func (a *App) GetAvailableEncryptionMethods() []string {
+	return []string{
+		string(crypto.AES_CTR),
+	}
+}
+
+// SelectFile opens a file dialog to select a file
+func (a *App) SelectFile() (string, error) {
+	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select File",
+		Filters: []runtime.FileFilter{
+			{
+				DisplayName: "All Files",
+				Pattern:     "*.*",
+			},
+			{
+				DisplayName: "Encrypted Files (*.gie)",
+				Pattern:     "*.gie",
+			},
+		},
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return selection, nil
+}
+
+// SelectDirectory opens a directory dialog to select a directory
 func (a *App) SelectDirectory() (string, error) {
-	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+	selection, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select Directory",
 	})
-}
-
-// IsDirectory checks if the given path is a directory
-func (a *App) IsDirectory(path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, err
-	}
-	return info.IsDir(), nil
-}
-
-// GetFilesInDirectory recursively gets all files in a directory
-func (a *App) GetFilesInDirectory(dirPath string) ([]string, error) {
-	var files []string
-
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories, only add files
-		if !info.IsDir() {
-			// Skip already encrypted files
-			if !strings.HasSuffix(path, ".gie") {
-				files = append(files, path)
-			}
-		}
-		return nil
-	})
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return files, nil
+	return selection, nil
 }
 
-// EncryptDirectory encrypts all files in a directory recursively
-func (a *App) EncryptDirectory(dirPath string, password string, hint string, encryptionLevel string, channel int) string {
+// EncryptDirectory encrypts all files in a directory
+func (a *App) EncryptDirectory(inputDir string, password string, hint string, encryptionLevel string, channel int, encryptionMethod string, deleteOriginal bool) string {
+	// Create cancellable operation
+	a.operationMutex.Lock()
+	if a.currentOperation != nil {
+		a.currentOperation.Cancel()
+	}
+	a.currentOperation = operation.NewOperation()
+	a.operationMutex.Unlock()
+
+	defer func() {
+		a.operationMutex.Lock()
+		a.currentOperation = nil
+		a.operationMutex.Unlock()
+	}()
+
+	logging.LogInfo("Starting directory encryption: %s", inputDir)
+
 	if password == "" {
-		return "Encryption failed: password cannot be empty."
-	}
-
-	// Check if path is actually a directory
-	isDir, err := a.IsDirectory(dirPath)
-	if err != nil {
-		return fmt.Sprintf("Error checking if path is directory: %v", err)
-	}
-	if !isDir {
-		return "Selected path is not a directory."
+		return "Directory encryption failed: password cannot be empty."
 	}
 
 	// Get all files in directory
-	files, err := a.GetFilesInDirectory(dirPath)
+	files, err := file.GetFilesInDirectory(inputDir)
 	if err != nil {
-		return fmt.Sprintf("Error getting files from directory: %v", err)
+		return fmt.Sprintf("Error reading directory: %v", err)
 	}
 
 	if len(files) == 0 {
 		return "No files found in directory to encrypt."
 	}
 
-	// Track results
-	var results []string
-	successCount := 0
+	logging.LogInfo("Found %d files to encrypt in directory", len(files))
 
-	for i, file := range files {
-		fmt.Printf("Encrypting file %d/%d: %s\n", i+1, len(files), file)
+	var successCount, failCount int
+	var lastError string
 
-		result := a.EncryptFile(file, password, hint, encryptionLevel, channel)
+	// Encrypt each file
+	for i, filePath := range files {
+		// Check for cancellation
+		a.operationMutex.RLock()
+		if a.currentOperation != nil && a.currentOperation.IsCancelled() {
+			a.operationMutex.RUnlock()
+			logging.LogInfo("Directory encryption cancelled by user")
+			return fmt.Sprintf("Operation cancelled. Encrypted %d of %d files.", successCount, len(files))
+		}
+		a.operationMutex.RUnlock()
+
+		// Emit progress for directory operation
+		progress := float64(i) / float64(len(files)) * 100
+		runtime.EventsEmit(a.ctx, "encryption:progress", map[string]interface{}{
+			"Percentage":     progress,
+			"Stage":          fmt.Sprintf("Encrypting file %d of %d", i+1, len(files)),
+			"BytesProcessed": int64(i),
+			"TotalBytes":     int64(len(files)),
+		})
+
+		// Encrypt individual file
+		result := a.EncryptFile(filePath, password, hint, encryptionLevel, channel, encryptionMethod, deleteOriginal)
+
 		if result == "success" {
 			successCount++
-			results = append(results, fmt.Sprintf("✓ %s", filepath.Base(file)))
+			logging.LogInfo("Successfully encrypted: %s", filePath)
 		} else {
-			results = append(results, fmt.Sprintf("✗ %s: %s", filepath.Base(file), result))
+			failCount++
+			lastError = result
+			logging.LogError("Failed to encrypt %s: %s", filePath, result)
 		}
 	}
 
-	// Return summary
-	summary := fmt.Sprintf("Directory encryption completed: %d/%d files encrypted successfully", successCount, len(files))
-	if successCount < len(files) {
-		summary += "\n\nDetailed results:\n" + strings.Join(results, "\n")
-	}
-
-	return summary
-}
-
-// DecryptDirectory decrypts all .gie files in a directory recursively
-func (a *App) DecryptDirectory(dirPath string, password string, channel int) string {
-	if password == "" {
-		return "Decryption failed: password cannot be empty."
-	}
-
-	// Check if path is actually a directory
-	isDir, err := a.IsDirectory(dirPath)
-	if err != nil {
-		return fmt.Sprintf("Error checking if path is directory: %v", err)
-	}
-	if !isDir {
-		return "Selected path is not a directory."
-	}
-
-	// Get all .gie files in directory
-	var encryptedFiles []string
-
-	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Only add .gie files
-		if !info.IsDir() && strings.HasSuffix(path, ".gie") {
-			encryptedFiles = append(encryptedFiles, path)
-		}
-		return nil
+	// Final progress update
+	runtime.EventsEmit(a.ctx, "encryption:progress", map[string]interface{}{
+		"Percentage":     100.0,
+		"Stage":          "Directory encryption completed",
+		"BytesProcessed": int64(len(files)),
+		"TotalBytes":     int64(len(files)),
 	})
 
+	// Show completion notification
+	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+		"type":     "success",
+		"title":    "Directory Encryption Completed",
+		"message":  fmt.Sprintf("Encrypted %d files successfully. %d failed.", successCount, failCount),
+		"duration": 8000,
+	})
+
+	logging.LogInfo("Directory encryption completed: %d success, %d failed", successCount, failCount)
+
+	if failCount > 0 {
+		return fmt.Sprintf("Directory encryption completed with errors. %d files encrypted, %d failed. Last error: %s", successCount, failCount, lastError)
+	}
+
+	return "success"
+}
+
+// DecryptDirectory decrypts all .gie files in a directory
+func (a *App) DecryptDirectory(inputDir string, password string) string {
+	// Create cancellable operation
+	a.operationMutex.Lock()
+	if a.currentOperation != nil {
+		a.currentOperation.Cancel()
+	}
+	a.currentOperation = operation.NewOperation()
+	a.operationMutex.Unlock()
+
+	defer func() {
+		a.operationMutex.Lock()
+		a.currentOperation = nil
+		a.operationMutex.Unlock()
+	}()
+
+	logging.LogInfo("Starting directory decryption: %s", inputDir)
+
+	if password == "" {
+		return "Directory decryption failed: password cannot be empty."
+	}
+
+	// Get all encrypted files in directory
+	encryptedFiles, err := file.GetEncryptedFilesInDirectory(inputDir)
 	if err != nil {
-		return fmt.Sprintf("Error scanning directory: %v", err)
+		return fmt.Sprintf("Error reading directory: %v", err)
 	}
 
 	if len(encryptedFiles) == 0 {
 		return "No encrypted files (.gie) found in directory to decrypt."
 	}
 
-	// Track results
-	var results []string
-	successCount := 0
+	logging.LogInfo("Found %d encrypted files to decrypt in directory", len(encryptedFiles))
 
-	for i, file := range encryptedFiles {
-		fmt.Printf("Decrypting file %d/%d: %s\n", i+1, len(encryptedFiles), file)
+	var successCount, failCount int
+	var lastError string
 
-		result := a.DecryptFile(file, password, false, channel)
+	// Decrypt each file
+	for i, filePath := range encryptedFiles {
+		// Check for cancellation
+		a.operationMutex.RLock()
+		if a.currentOperation != nil && a.currentOperation.IsCancelled() {
+			a.operationMutex.RUnlock()
+			logging.LogInfo("Directory decryption cancelled by user")
+			return fmt.Sprintf("Operation cancelled. Decrypted %d of %d files.", successCount, len(encryptedFiles))
+		}
+		a.operationMutex.RUnlock()
+
+		// Emit progress for directory operation
+		progress := float64(i) / float64(len(encryptedFiles)) * 100
+		runtime.EventsEmit(a.ctx, "encryption:progress", map[string]interface{}{
+			"Percentage":     progress,
+			"Stage":          fmt.Sprintf("Decrypting file %d of %d", i+1, len(encryptedFiles)),
+			"BytesProcessed": int64(i),
+			"TotalBytes":     int64(len(encryptedFiles)),
+		})
+
+		// Decrypt individual file
+		result := a.DecryptFile(filePath, password, false)
+
 		if result == "success" {
 			successCount++
-			results = append(results, fmt.Sprintf("✓ %s", filepath.Base(file)))
+			logging.LogInfo("Successfully decrypted: %s", filePath)
 		} else {
-			results = append(results, fmt.Sprintf("✗ %s: %s", filepath.Base(file), result))
+			failCount++
+			lastError = result
+			logging.LogError("Failed to decrypt %s: %s", filePath, result)
 		}
 	}
 
-	// Return summary
-	summary := fmt.Sprintf("Directory decryption completed: %d/%d files decrypted successfully", successCount, len(encryptedFiles))
-	if successCount < len(encryptedFiles) {
-		summary += "\n\nDetailed results:\n" + strings.Join(results, "\n")
+	// Final progress update
+	runtime.EventsEmit(a.ctx, "encryption:progress", map[string]interface{}{
+		"Percentage":     100.0,
+		"Stage":          "Directory decryption completed",
+		"BytesProcessed": int64(len(encryptedFiles)),
+		"TotalBytes":     int64(len(encryptedFiles)),
+	})
+
+	// Show completion notification
+	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+		"type":     "success",
+		"title":    "Directory Decryption Completed",
+		"message":  fmt.Sprintf("Decrypted %d files successfully. %d failed.", successCount, failCount),
+		"duration": 8000,
+	})
+
+	logging.LogInfo("Directory decryption completed: %d success, %d failed", successCount, failCount)
+
+	if failCount > 0 {
+		return fmt.Sprintf("Directory decryption completed with errors. %d files decrypted, %d failed. Last error: %s", successCount, failCount, lastError)
 	}
 
-	return summary
+	return "success"
 }
 
-// GetHint reads the hint from a .gie file without full decryption.
-func (a *App) GetHint(inputFile string) (string, error) {
-	// Only try to read hints from .gie files
-	if !strings.HasSuffix(strings.ToLower(inputFile), ".gie") {
-		return "", nil // Not a gie file, no hint to read
-	}
+// OpenExternalURL opens an external URL in the default browser
+func (a *App) OpenExternalURL(url string) error {
+	logging.LogInfo("Opening external URL: %s", url)
 
-	// Open input file
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return "", fmt.Errorf("error opening file: %v", err)
-	}
-	defer inFile.Close()
+	// Use runtime.BrowserOpenURL to open URL in default browser
+	runtime.BrowserOpenURL(a.ctx, url)
 
-	// Read hint length (uint16, 2 bytes)
-	var hintLen uint16
-	err = binary.Read(inFile, binary.BigEndian, &hintLen)
-	if err != nil {
-		// If we can't even read the length, it's probably not a valid .gie file or is corrupted
-		return "", fmt.Errorf("error reading hint length: %v", err)
-	}
-
-	// Basic sanity check for hint length to avoid allocating huge memory for a corrupted file
-	const maxHintLength = 4096
-	if hintLen > maxHintLength {
-		return "", fmt.Errorf("hint length (%d) exceeds maximum allowed size", hintLen)
-	}
-
-	if hintLen == 0 {
-		return "", nil
-	}
-
-	// Read the hint itself
-	hintBytes := make([]byte, hintLen)
-	_, err = io.ReadFull(inFile, hintBytes)
-	if err != nil {
-		return "", fmt.Errorf("error reading hint: %v", err)
-	}
-
-	return string(hintBytes), nil
+	return nil
 }
 
-// DeriveKeyFromPassword derives a key from a password and salt using PBKDF2-HMAC-SHA256.
-func DeriveKeyFromPassword(password, salt []byte, iterations, keyLength int) []byte {
-	return pbkdf2.Key(password, salt, iterations, keyLength, sha256.New)
+// SetTheme sets the application theme
+func (a *App) SetTheme(theme string) error {
+	if a.settings != nil {
+		a.settings.Theme = theme
+		return config.SaveSettings(a.settings)
+	}
+	return fmt.Errorf("settings not initialized")
 }
 
-// IsPasswordValid checks if the password contains only allowed characters.
-func IsPasswordValid(password string) bool {
-	allowedCharsPattern := regexp.MustCompile(`^[a-zA-Z0-9!@#$%^&*()_\-+=<>?,.:;{}\[\]|~` + "`" + `]*$`)
-	return allowedCharsPattern.MatchString(password)
+// SetDeleteOriginal sets the delete original file setting
+func (a *App) SetDeleteOriginal(deleteOriginal bool) error {
+	if a.settings != nil {
+		a.settings.DeleteOriginal = deleteOriginal
+		return config.SaveSettings(a.settings)
+	}
+	return fmt.Errorf("settings not initialized")
 }
 
-// IsPathValid checks if a file path is valid.
-func IsPathValid(path string) (bool, string) {
-	if len(path) > 259 {
-		return false, "The path is too long (max 259 characters)."
+// RestoreDefaultSettings restores channel and level to defaults while preserving theme
+func (a *App) RestoreDefaultSettings() error {
+	if a.settings != nil {
+		// Preserve theme but reset other values to defaults
+		currentTheme := a.settings.Theme
+		a.settings.LastUsedChannel = 50
+		a.settings.LastUsedLevel = "Normal"
+		a.settings.Theme = currentTheme
+
+		logging.LogInfo("Settings restored to defaults - Channel: %d, Level: %s, Theme: %s",
+			a.settings.LastUsedChannel, a.settings.LastUsedLevel, a.settings.Theme)
+
+		return config.SaveSettings(a.settings)
 	}
-
-	baseName := filepath.Base(path)
-
-	// Check for invalid characters in the base name.
-	// This regex checks for characters that are generally problematic in file names.
-	invalidCharPattern := regexp.MustCompile(`[<>:\"/\\|\?\*\x00-\x1F]`)
-	if invalidCharPattern.MatchString(baseName) {
-		return false, "The file name contains invalid characters (e.g., <, >, :, \"/, \\, |, ?, *) or non-ASCII characters like emojis."
-	}
-
-	return true, ""
+	return fmt.Errorf("settings not initialized")
 }
 
-func GenerateSalt(length int) ([]byte, error) {
-	salt := make([]byte, length)
-	_, err := rand.Read(salt)
-	if err != nil {
-		return nil, err
+// UpdateChannelAndLevel updates only channel and level temporarily (not saved to disk)
+func (a *App) UpdateChannelAndLevel(channel int, level string) {
+	if a.settings != nil {
+		a.settings.LastUsedChannel = channel
+		a.settings.LastUsedLevel = level
+
+		logging.LogInfo("Temporary settings update - Channel: %d, Level: %s", channel, level)
+
+		// Emit event to update frontend
+		runtime.EventsEmit(a.ctx, "settings:updated", a.settings)
 	}
-	return salt, nil
 }
 
-func GenerateIV(length int) ([]byte, error) {
-	iv := make([]byte, length)
-	_, err := rand.Read(iv)
-	if err != nil {
-		return nil, err
+// UpdateChannel updates only the channel (for user input)
+func (a *App) UpdateChannel(channel int) {
+	if a.settings != nil {
+		a.settings.LastUsedChannel = channel
+		logging.LogInfo("User updated channel to: %d", channel)
+
+		// Emit event to update frontend
+		runtime.EventsEmit(a.ctx, "settings:updated", a.settings)
 	}
-	return iv, nil
+}
+
+// UpdateLevel updates only the level (for auto-detection)
+func (a *App) UpdateLevel(level string) {
+	if a.settings != nil {
+		a.settings.LastUsedLevel = level
+		logging.LogInfo("Auto-updated level to: %s", level)
+
+		// Emit event to update frontend
+		runtime.EventsEmit(a.ctx, "settings:updated", a.settings)
+	}
+}
+
+// LoadFileForDecryption loads a file and automatically detects its encryption settings
+func (a *App) LoadFileForDecryption(inputFile string) *FileMetadata {
+	metadata := a.GetFileMetadata(inputFile)
+	if metadata == nil {
+		logging.LogInfo("Failed to read metadata from file: %s", inputFile)
+		return nil
+	}
+
+	// Temporarily update settings to match file metadata (but don't save to disk)
+	// The user's channel setting is preserved - only the level is auto-detected
+	if a.settings != nil {
+		a.settings.LastUsedLevel = metadata.EncryptionLevel
+
+		logging.LogInfo("Auto-detected file settings - Level: %s, Channel: %d (user channel: %d)",
+			metadata.EncryptionLevel, metadata.Channel, a.settings.LastUsedChannel)
+
+		// Emit event to update frontend with detected settings
+		runtime.EventsEmit(a.ctx, "file:loaded", map[string]interface{}{
+			"metadata": metadata,
+			"settings": a.settings,
+		})
+	}
+
+	return metadata
+}
+
+// ValidateFileChannel checks if the file's channel matches the user's current channel
+func (a *App) ValidateFileChannel(inputFile string) bool {
+	metadata := a.GetFileMetadata(inputFile)
+	if metadata == nil {
+		return false
+	}
+
+	isValid := metadata.Channel == a.settings.LastUsedChannel
+
+	logging.LogInfo("Channel validation - File: %d, User: %d, Valid: %v",
+		metadata.Channel, a.settings.LastUsedChannel, isValid)
+
+	return isValid
 }

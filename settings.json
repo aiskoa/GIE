@@ -1,0 +1,7 @@
+{
+  "theme": "dark",
+  "defaultEncryption": "AES-CTR",
+  "deleteOriginal": false,
+  "lastUsedLevel": "Normal",
+  "lastUsedChannel": 50
+}

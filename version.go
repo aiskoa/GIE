@@ -1,8 +1,8 @@
 package main
 
 const (
-	Version     = "2.1.5"
+	Version     = "2.0.0"
 	Name        = "GIE"
 	Author      = "AISKOA"
-	Description = "GIE Encrypt your files easily"
+	Description = "GIE - Go-based Information Encryptor v2.0.0 - Enhanced Security & Themes"
 )
