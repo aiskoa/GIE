@@ -14,7 +14,6 @@ const (
 	RetryDelay = 200 * time.Millisecond
 )
 
-// IsDirectory checks if the given path is a directory
 func IsDirectory(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -23,7 +22,6 @@ func IsDirectory(path string) (bool, error) {
 	return info.IsDir(), nil
 }
 
-// GetFilesInDirectory recursively gets all files in a directory
 func GetFilesInDirectory(dirPath string) ([]string, error) {
 	var files []string
 
@@ -129,14 +127,12 @@ func SafeRenameFile(oldPath, newPath string) error {
 	return nil
 }
 
-// IsPasswordValid checks if the password contains only allowed characters
 func IsPasswordValid(password string) bool {
 	// Allow alphanumeric and common special characters
 	allowedCharsPattern := regexp.MustCompile(`^[a-zA-Z0-9!@#$%^&*()_\-+=<>?,.:;{}\[\]|~` + "`" + `]*$`)
 	return allowedCharsPattern.MatchString(password)
 }
 
-// IsPathValid checks if a file path is valid
 func IsPathValid(path string) (bool, string) {
 	if len(path) > 259 {
 		return false, "The path is too long (max 259 characters)."
@@ -153,7 +149,6 @@ func IsPathValid(path string) (bool, string) {
 	return true, ""
 }
 
-// ValidateChannel validates that channel is within acceptable range
 func ValidateChannel(channel int) error {
 	if channel < 0 {
 		return fmt.Errorf("channel cannot be negative")

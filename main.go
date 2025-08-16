@@ -63,8 +63,8 @@ func main() {
 		},
 		MinWidth:   520,
 		MinHeight:  820,
-		MaxWidth:   520,
-		MaxHeight:  820,
+		MaxWidth:   1200, // for debugger
+		MaxHeight:  1000,
 		Fullscreen: false,
 	})
 

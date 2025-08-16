@@ -7,17 +7,15 @@ import (
 	"time"
 )
 
-// OperationManager manages cancellable operations
 type OperationManager struct {
 	mu         sync.RWMutex
 	operations map[string]*Operation
 	nextID     int
 }
 
-// Operation represents a cancellable operation
 type Operation struct {
 	ID       string
-	Type     string // "encrypt" or "decrypt"
+	Type     string
 	FilePath string
 	Context  context.Context
 	Cancel   context.CancelFunc
@@ -27,7 +25,6 @@ type Operation struct {
 var globalManager *OperationManager
 var once sync.Once
 
-// GetManager returns the global operation manager
 func GetManager() *OperationManager {
 	once.Do(func() {
 		globalManager = &OperationManager{
@@ -38,7 +35,6 @@ func GetManager() *OperationManager {
 	return globalManager
 }
 
-// StartOperation creates and registers a new cancellable operation
 func (om *OperationManager) StartOperation(operationType, filePath string) *Operation {
 	om.mu.Lock()
 	defer om.mu.Unlock()
@@ -60,7 +56,6 @@ func (om *OperationManager) StartOperation(operationType, filePath string) *Oper
 	return op
 }
 
-// CancelOperation cancels an operation by ID
 func (om *OperationManager) CancelOperation(operationID string) bool {
 	om.mu.Lock()
 	defer om.mu.Unlock()
@@ -74,14 +69,12 @@ func (om *OperationManager) CancelOperation(operationID string) bool {
 	return false
 }
 
-// FinishOperation marks an operation as completed and removes it
 func (om *OperationManager) FinishOperation(operationID string, status string) {
 	om.mu.Lock()
 	defer om.mu.Unlock()
 
 	if op, exists := om.operations[operationID]; exists {
 		op.Status = status
-		// Keep operation for a short time for status checking
 		go func() {
 			time.Sleep(5 * time.Second)
 			om.mu.Lock()
@@ -91,7 +84,6 @@ func (om *OperationManager) FinishOperation(operationID string, status string) {
 	}
 }
 
-// GetOperation returns an operation by ID
 func (om *OperationManager) GetOperation(operationID string) (*Operation, bool) {
 	om.mu.RLock()
 	defer om.mu.RUnlock()
@@ -100,7 +92,6 @@ func (om *OperationManager) GetOperation(operationID string) (*Operation, bool) 
 	return op, exists
 }
 
-// GetActiveOperations returns all active operations
 func (om *OperationManager) GetActiveOperations() []*Operation {
 	om.mu.RLock()
 	defer om.mu.RUnlock()
@@ -115,7 +106,6 @@ func (om *OperationManager) GetActiveOperations() []*Operation {
 	return active
 }
 
-// IsCancelled checks if the operation context is cancelled
 func (op *Operation) IsCancelled() bool {
 	select {
 	case <-op.Context.Done():
@@ -125,7 +115,6 @@ func (op *Operation) IsCancelled() bool {
 	}
 }
 
-// NewOperation creates a new simple operation for compatibility
 func NewOperation() *Operation {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Operation{

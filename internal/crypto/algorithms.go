@@ -5,13 +5,15 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"fmt"
+
+	"golang.org/x/crypto/chacha20"
 )
 
-// EncryptionMethod represents different encryption algorithms
 type EncryptionMethod string
 
 const (
-	AES_CTR EncryptionMethod = "AES-CTR"
+	AES_CTR  EncryptionMethod = "AES-CTR"
+	CHACHA20 EncryptionMethod = "ChaCha20"
 )
 
 // EncryptionConfig holds configuration for encryption
@@ -31,7 +33,6 @@ type Encryptor interface {
 	GetKeySize() int
 }
 
-// AESCTREncryptor implements AES-CTR encryption
 type AESCTREncryptor struct {
 	stream cipher.Stream
 }
@@ -61,11 +62,48 @@ func (e *AESCTREncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 func (e *AESCTREncryptor) GetIVSize() int  { return 16 }
 func (e *AESCTREncryptor) GetKeySize() int { return 32 } // AES-256
 
+type ChaCha20Encryptor struct {
+	cipher *chacha20.Cipher
+}
+
+func NewChaCha20Encryptor(key, nonce []byte) (*ChaCha20Encryptor, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("ChaCha20 key must be 32 bytes, got %d", len(key))
+	}
+	if len(nonce) != 12 {
+		return nil, fmt.Errorf("ChaCha20 nonce must be 12 bytes, got %d", len(nonce))
+	}
+
+	cipher, err := chacha20.NewUnauthenticatedCipher(key, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("error creating ChaCha20 cipher: %v", err)
+	}
+
+	return &ChaCha20Encryptor{cipher: cipher}, nil
+}
+
+func (e *ChaCha20Encryptor) Encrypt(plaintext []byte) ([]byte, error) {
+	ciphertext := make([]byte, len(plaintext))
+	e.cipher.XORKeyStream(ciphertext, plaintext)
+	return ciphertext, nil
+}
+
+func (e *ChaCha20Encryptor) Decrypt(ciphertext []byte) ([]byte, error) {
+	plaintext := make([]byte, len(ciphertext))
+	e.cipher.XORKeyStream(plaintext, ciphertext)
+	return plaintext, nil
+}
+
+func (e *ChaCha20Encryptor) GetIVSize() int  { return 12 } // ChaCha20 nonce size
+func (e *ChaCha20Encryptor) GetKeySize() int { return 32 } // ChaCha20 key size
+
 // CreateEncryptor creates an encryptor based on the method
 func CreateEncryptor(method EncryptionMethod, key, iv []byte) (Encryptor, error) {
 	switch method {
 	case AES_CTR:
 		return NewAESCTREncryptor(key, iv)
+	case CHACHA20:
+		return NewChaCha20Encryptor(key, iv)
 	default:
 		return NewAESCTREncryptor(key, iv) // Default to AES-CTR
 	}
@@ -76,6 +114,8 @@ func GetMethodCode(method EncryptionMethod) byte {
 	switch method {
 	case AES_CTR:
 		return 0
+	case CHACHA20:
+		return 1
 	default:
 		return 0
 	}
@@ -86,12 +126,13 @@ func GetMethodFromCode(code byte) EncryptionMethod {
 	switch code {
 	case 0:
 		return AES_CTR
+	case 1:
+		return CHACHA20
 	default:
 		return AES_CTR
 	}
 }
 
-// GenerateRandomBytes generates cryptographically secure random bytes
 func GenerateRandomBytes(length int) ([]byte, error) {
 	bytes := make([]byte, length)
 	_, err := rand.Read(bytes)
@@ -101,12 +142,10 @@ func GenerateRandomBytes(length int) ([]byte, error) {
 	return bytes, nil
 }
 
-// GenerateSalt generates a random salt for key derivation
 func GenerateSalt(length int) ([]byte, error) {
 	return GenerateRandomBytes(length)
 }
 
-// GenerateIV generates a random initialization vector
 func GenerateIV(length int) ([]byte, error) {
 	return GenerateRandomBytes(length)
 }

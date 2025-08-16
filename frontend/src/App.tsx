@@ -30,7 +30,6 @@ const normalizePath = (path: string): string => {
   return path;
 };
 
-// Theme definitions
 const themes = {
   dark: {
     name: "Dark",
@@ -101,13 +100,20 @@ function App() {
   const [progress, setProgress] = useState(0);
   const [canCancel, setCanCancel] = useState(false);
   const [operationId, setOperationId] = useState<string | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const [systemInfo, setSystemInfo] = useState<any>(null);
 
   useEffect(() => {
-    // Load settings on startup
     loadSettings();
     loadEncryptionMethods();
 
-    // Set up file drop handler
+    const initializeWindow = async () => {
+      await setWindowResizable(false);
+      await resizeWindow(520, 820);
+    };
+    initializeWindow();
+
     OnFileDrop(async (x, y, paths) => {
       if (paths.length > 0) {
         const normalizedPath = normalizePath(paths[0]);
@@ -115,36 +121,44 @@ function App() {
       }
     }, false);
 
-    // Listen for file association events
     EventsOn("wails:open:gie", (filePath: string) => {
       handleFileSelect(filePath);
     });
 
-    // Listen for real progress updates from backend
     EventsOn("encryption:progress", (progressData: any) => {
       console.log("Progress event received:", progressData);
       setProgress(Math.round(progressData.Percentage));
       setStatus(progressData.Stage || "Processing...");
     });
 
-    // Listen for system notifications
     EventsOn("system:notification", (notificationData: any) => {
       showSystemNotification(notificationData.title, notificationData.message);
     });
 
-    // Listen for custom notifications from backend
     EventsOn("notification", (notificationData: any) => {
       showNotification(notificationData);
     });
 
-    // Listen for operation cancellation
     EventsOn("operation:cancel", () => {
       setCanCancel(false);
       setIsProcessing(false);
       setProgress(0);
       setStatus("Operation cancelled");
     });
-  }, []); // Solo ejecutar una vez al montar el componente
+
+    // Add keyboard shortcut for debug mode (Ctrl + Shift + G)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key === "G") {
+        event.preventDefault();
+        toggleDebugMode();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     // Apply theme to CSS variables
@@ -452,6 +466,84 @@ function App() {
     }
   };
 
+  // Debug mode functions
+  const toggleDebugMode = async () => {
+    if (!debugMode) {
+      await loadDebugData();
+      await resizeWindow(950, 700);
+      await setWindowResizable(false);
+    } else {
+      await resizeWindow(520, 820);
+      await setWindowResizable(false);
+    }
+    setDebugMode(!debugMode);
+  };
+
+  const loadDebugData = async () => {
+    try {
+      const { GetDebugLogs, GetSystemInfo } = await import(
+        "../wailsjs/go/main/App"
+      );
+      const logs = await GetDebugLogs();
+      const sysInfo = await GetSystemInfo();
+      setDebugLogs(logs);
+      setSystemInfo(sysInfo);
+    } catch (error) {
+      console.error("Error loading debug data:", error);
+    }
+  };
+
+  const clearDebugLogs = async () => {
+    try {
+      const { ClearDebugLogs } = await import("../wailsjs/go/main/App");
+      await ClearDebugLogs();
+      setDebugLogs([]);
+    } catch (error) {
+      console.error("Error clearing debug logs:", error);
+    }
+  };
+
+  const refreshDebugData = async () => {
+    await loadDebugData();
+  };
+
+  const resizeWindow = async (width: number, height: number) => {
+    try {
+      const { ResizeWindow } = await import("../wailsjs/go/main/App");
+      await ResizeWindow(width, height);
+    } catch (error) {
+      console.error("Error resizing window:", error);
+    }
+  };
+
+  const setWindowResizable = async (resizable: boolean) => {
+    try {
+      const { SetWindowResizable } = await import("../wailsjs/go/main/App");
+      await SetWindowResizable(resizable);
+    } catch (error) {
+      console.error("Error setting window resizable:", error);
+    }
+  };
+
+  const copyLogsToClipboard = async () => {
+    try {
+      const logsText = debugLogs.join("\n");
+      await navigator.clipboard.writeText(logsText);
+
+      // Show temporary success message
+      setStatus("✅ Debug logs copied to clipboard");
+      setTimeout(() => {
+        setStatus("");
+      }, 2000);
+    } catch (error) {
+      console.error("Error copying logs:", error);
+      setStatus("❌ Failed to copy logs to clipboard");
+      setTimeout(() => {
+        setStatus("");
+      }, 2000);
+    }
+  };
+
   const renderThemeSelector = () => (
     <div className="theme-selector">
       {Object.entries(themes).map(([key, theme]) => (
@@ -549,7 +641,17 @@ function App() {
 
       <div
         className="advanced-options-toggle"
-        onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+        onClick={async () => {
+          const newState = !showAdvancedOptions;
+          setShowAdvancedOptions(newState);
+
+          if (newState) {
+            await resizeWindow(520, 950);
+          } else {
+            await resizeWindow(520, 820);
+          }
+          await setWindowResizable(false);
+        }}
       >
         {showAdvancedOptions ? "Hide" : "Show"} Advanced Options
       </div>
@@ -689,9 +791,164 @@ function App() {
     </div>
   );
 
+  const renderDebugPanel = () => (
+    <div className="debug-panel">
+      <div className="debug-header">
+        <div className="debug-title">
+          <h2>DEBUG MODE</h2>
+        </div>
+        <div className="debug-controls">
+          <button onClick={refreshDebugData} className="debug-button refresh">
+            🔄 Refresh
+          </button>
+          <button onClick={copyLogsToClipboard} className="debug-button copy">
+            📋 Copy Logs
+          </button>
+          <button onClick={clearDebugLogs} className="debug-button clear">
+            🗑️ Clear
+          </button>
+          <button onClick={toggleDebugMode} className="debug-button close">
+            ❌ Close
+          </button>
+        </div>
+      </div>
+
+      <div className="debug-content">
+        <div className="debug-left-panel">
+          <div className="debug-section system-section">
+            <div className="section-header">
+              <h4>📊 System Information</h4>
+              <span className="section-badge">Live</span>
+            </div>
+            {systemInfo && (
+              <div className="system-info-grid">
+                <div className="info-card">
+                  <div className="info-label">Platform</div>
+                  <div className="info-value">
+                    {systemInfo.os} ({systemInfo.arch})
+                  </div>
+                </div>
+                <div className="info-card">
+                  <div className="info-label">Go Runtime</div>
+                  <div className="info-value">{systemInfo.goVersion}</div>
+                </div>
+                <div className="info-card">
+                  <div className="info-label">CPU Cores</div>
+                  <div className="info-value">{systemInfo.cpus}</div>
+                </div>
+                <div className="info-card">
+                  <div className="info-label">Goroutines</div>
+                  <div className="info-value">{systemInfo.goroutines}</div>
+                </div>
+                <div className="info-card">
+                  <div className="info-label">Memory Allocated</div>
+                  <div className="info-value">
+                    {(systemInfo.memAlloc / 1024).toFixed(2)} MB
+                  </div>
+                </div>
+                <div className="info-card">
+                  <div className="info-label">Memory Total</div>
+                  <div className="info-value">
+                    {(systemInfo.memTotal / 1024).toFixed(2)} MB
+                  </div>
+                </div>
+                <div className="info-card full-width">
+                  <div className="info-label">Working Directory</div>
+                  <div className="info-value path">{systemInfo.workingDir}</div>
+                </div>
+                <div className="info-card full-width">
+                  <div className="info-label">Log File</div>
+                  <div className="info-value path">{systemInfo.logPath}</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="debug-section app-section">
+            <div className="section-header">
+              <h4>⚙️ Application State</h4>
+            </div>
+            <div className="app-state-grid">
+              <div className="state-card">
+                <div className="state-label">Current File</div>
+                <div className="state-value">
+                  {filePath ? filePath.split("\\").pop() : "None"}
+                </div>
+              </div>
+              <div className="state-card">
+                <div className="state-label">Processing</div>
+                <div className="state-value">
+                  {isProcessing ? "🟢 Active" : "🔴 Idle"}
+                </div>
+              </div>
+              <div className="state-card">
+                <div className="state-label">Progress</div>
+                <div className="state-value">{progress}%</div>
+              </div>
+              <div className="state-card">
+                <div className="state-label">Theme</div>
+                <div className="state-value">{currentTheme}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="debug-right-panel">
+          <div className="debug-section logs-section">
+            <div className="section-header">
+              <h4>📝 Debug Logs</h4>
+              <div className="logs-info">
+                <span className="logs-count">{debugLogs.length} entries</span>
+                <span className="logs-status">🟢 Live</span>
+              </div>
+            </div>
+            <div className="debug-logs-container">
+              {debugLogs.length === 0 ? (
+                <div className="no-logs">
+                  <div className="no-logs-icon">📝</div>
+                  <div className="no-logs-text">No debug logs available</div>
+                  <div className="no-logs-hint">
+                    Perform some operations to see logs here
+                  </div>
+                </div>
+              ) : (
+                <div className="debug-logs">
+                  {debugLogs.map((log, index) => {
+                    const logLevel = log.includes("[ERROR]")
+                      ? "error"
+                      : log.includes("[WARNING]")
+                      ? "warning"
+                      : log.includes("[INFO]")
+                      ? "info"
+                      : "debug";
+                    const timestamp = log.match(/\[(.*?)\]/)?.[1] || "";
+                    const message = log.replace(
+                      /\[.*?\]\s*\w+\s*\[.*?\]\s*/,
+                      ""
+                    );
+
+                    return (
+                      <div key={index} className={`log-entry ${logLevel}`}>
+                        <div className="log-timestamp">{timestamp}</div>
+                        <div className="log-level">
+                          {logLevel.toUpperCase()}
+                        </div>
+                        <div className="log-message">{message}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div id="App" className={`theme-${currentTheme}`}>
-      <div className="container">
+      <div className={`container ${debugMode ? 'debug-mode' : ''}`}>
         <div className="header">
           {renderThemeSelector()}
           <img
@@ -703,7 +960,11 @@ function App() {
           />
           <h3 className="btn-shine">Encrypt your files easily</h3>
         </div>
-        {filePath ? renderFileView() : renderInitialView()}
+        {debugMode
+          ? renderDebugPanel()
+          : filePath
+          ? renderFileView()
+          : renderInitialView()}
       </div>
     </div>
   );

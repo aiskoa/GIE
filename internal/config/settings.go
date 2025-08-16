@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 )
 
-// Settings represents application settings
 type Settings struct {
 	Theme             string `json:"theme"`
 	DefaultEncryption string `json:"defaultEncryption"`
@@ -27,7 +26,6 @@ func DefaultSettings() *Settings {
 	}
 }
 
-// GetConfigDir returns the configuration directory path
 func GetConfigDir() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -44,7 +42,6 @@ func GetConfigDir() (string, error) {
 	return configDir, nil
 }
 
-// GetSettingsPath returns the path to the settings file
 func GetSettingsPath() (string, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
@@ -54,7 +51,6 @@ func GetSettingsPath() (string, error) {
 	return filepath.Join(configDir, "settings.json"), nil
 }
 
-// LoadSettings loads settings from file or returns defaults
 func LoadSettings() (*Settings, error) {
 	settingsPath, err := GetSettingsPath()
 	if err != nil {
@@ -77,7 +73,7 @@ func LoadSettings() (*Settings, error) {
 	}
 
 	// Validate and fix encryption method if invalid
-	validMethods := []string{"AES-CTR", "AES-GCM"}
+	validMethods := []string{"AES-CTR", "ChaCha20"}
 	isValid := false
 	for _, method := range validMethods {
 		if settings.DefaultEncryption == method {

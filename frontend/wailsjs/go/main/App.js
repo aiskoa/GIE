@@ -6,6 +6,10 @@ export function CancelOperation() {
   return window['go']['main']['App']['CancelOperation']();
 }
 
+export function ClearDebugLogs() {
+  return window['go']['main']['App']['ClearDebugLogs']();
+}
+
 export function DecryptDirectory(arg1, arg2) {
   return window['go']['main']['App']['DecryptDirectory'](arg1, arg2);
 }
@@ -26,6 +30,10 @@ export function GetAvailableEncryptionMethods() {
   return window['go']['main']['App']['GetAvailableEncryptionMethods']();
 }
 
+export function GetDebugLogs() {
+  return window['go']['main']['App']['GetDebugLogs']();
+}
+
 export function GetFileMetadata(arg1) {
   return window['go']['main']['App']['GetFileMetadata'](arg1);
 }
@@ -36,6 +44,10 @@ export function GetHint(arg1) {
 
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
+}
+
+export function GetSystemInfo() {
+  return window['go']['main']['App']['GetSystemInfo']();
 }
 
 export function IsDirectory(arg1) {
@@ -58,6 +70,10 @@ export function OpenExternalURL(arg1) {
   return window['go']['main']['App']['OpenExternalURL'](arg1);
 }
 
+export function ResizeWindow(arg1, arg2) {
+  return window['go']['main']['App']['ResizeWindow'](arg1, arg2);
+}
+
 export function RestoreDefaultSettings() {
   return window['go']['main']['App']['RestoreDefaultSettings']();
 }
@@ -76,6 +92,10 @@ export function SetDeleteOriginal(arg1) {
 
 export function SetTheme(arg1) {
   return window['go']['main']['App']['SetTheme'](arg1);
+}
+
+export function SetWindowResizable(arg1) {
+  return window['go']['main']['App']['SetWindowResizable'](arg1);
 }
 
 export function UpdateChannel(arg1) {

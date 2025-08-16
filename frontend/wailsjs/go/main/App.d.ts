@@ -6,6 +6,8 @@ import {context} from '../models';
 
 export function CancelOperation():Promise<void>;
 
+export function ClearDebugLogs():Promise<void>;
+
 export function DecryptDirectory(arg1:string,arg2:string):Promise<string>;
 
 export function DecryptFile(arg1:string,arg2:string,arg3:boolean):Promise<string>;
@@ -16,11 +18,15 @@ export function EncryptFile(arg1:string,arg2:string,arg3:string,arg4:string,arg5
 
 export function GetAvailableEncryptionMethods():Promise<Array<string>>;
 
+export function GetDebugLogs():Promise<Array<string>>;
+
 export function GetFileMetadata(arg1:string):Promise<main.FileMetadata>;
 
 export function GetHint(arg1:string):Promise<string>;
 
 export function GetSettings():Promise<config.Settings>;
+
+export function GetSystemInfo():Promise<Record<string, any>>;
 
 export function IsDirectory(arg1:string):Promise<boolean>;
 
@@ -32,6 +38,8 @@ export function OnDomReady(arg1:context.Context):Promise<void>;
 
 export function OpenExternalURL(arg1:string):Promise<void>;
 
+export function ResizeWindow(arg1:number,arg2:number):Promise<void>;
+
 export function RestoreDefaultSettings():Promise<void>;
 
 export function SelectDirectory():Promise<string>;
@@ -41,6 +49,8 @@ export function SelectFile():Promise<string>;
 export function SetDeleteOriginal(arg1:boolean):Promise<void>;
 
 export function SetTheme(arg1:string):Promise<void>;
+
+export function SetWindowResizable(arg1:boolean):Promise<void>;
 
 export function UpdateChannel(arg1:number):Promise<void>;
 

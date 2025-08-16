@@ -1,3 +1,20 @@
+// app.go: The main application file.
+// /internal/: config, crypto, file, operation files
+// --------------------------------------------------------------------
+//
+// Copyright (C) 2025  Aiskoa <aiskoa@mail.com>
+// --------------------------------------------------------------------
+// Author: Aiskoa
+// Language: Go
+// Last update: 2025-08-15
+// Time: 19:44
+// Email: aiskoa@mail.com
+// Web: https://github.com/aiskoa/GIE
+// Description: File Encryption
+// License: https://github.com/aiskoa/GIE/blob/main/LICENSE
+// --------------------------------------------------------------------
+//
+
 package main
 
 import (
@@ -10,6 +27,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 
@@ -55,13 +73,11 @@ func NewApp() *App {
 	}
 }
 
-// OnStartup is called when the app starts up
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
 	logging.LogInfo("Application started")
 }
 
-// OnDomReady is called after front-end resources have been loaded
 func (a *App) OnDomReady(ctx context.Context) {
 	// Here you can call the frontend
 }
@@ -73,23 +89,19 @@ func (a *App) OnBeforeClose(ctx context.Context) (prevent bool) {
 	return false
 }
 
-// OnShutdown is called when the application is shutting down
 func (a *App) OnShutdown(ctx context.Context) {
 	logging.LogInfo("Application shutting down")
 }
 
-// GetSettings returns the current settings
 func (a *App) GetSettings() *config.Settings {
 	return a.settings
 }
 
-// UpdateSettings updates the settings
 func (a *App) UpdateSettings(settings *config.Settings) error {
 	a.settings = settings
 	return config.SaveSettings(settings)
 }
 
-// IsDirectory checks if the given path is a directory
 func (a *App) IsDirectory(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -132,28 +144,24 @@ func (a *App) GetFileMetadata(inputFile string) *FileMetadata {
 		hint = string(hintBytes)
 	}
 
-	// Read method code
 	var methodCode byte
 	err = binary.Read(inFile, binary.BigEndian, &methodCode)
 	if err != nil {
 		return nil
 	}
 
-	// Read channel as uint16 (new format)
 	var channel uint16
 	err = binary.Read(inFile, binary.BigEndian, &channel)
 	if err != nil {
 		return nil
 	}
 
-	// Read encryption level
 	var levelCode byte
 	err = binary.Read(inFile, binary.BigEndian, &levelCode)
 	if err != nil {
 		return nil
 	}
 
-	// Try to read original file extension (new format)
 	var originalExt string
 	var originalExtLen uint16
 	err = binary.Read(inFile, binary.BigEndian, &originalExtLen)
@@ -165,7 +173,6 @@ func (a *App) GetFileMetadata(inputFile string) *FileMetadata {
 		}
 	}
 
-	// Convert codes to readable values
 	method := crypto.GetMethodFromCode(methodCode)
 	levelName := crypto.EncryptionLevelCodesReverse[levelCode]
 	if levelName == "" {
@@ -177,11 +184,10 @@ func (a *App) GetFileMetadata(inputFile string) *FileMetadata {
 		EncryptionLevel: levelName,
 		Channel:         int(channel),
 		Method:          string(method),
-		OriginalExt:     originalExt, // Include original extension in metadata
+		OriginalExt:     originalExt,
 	}
 }
 
-// GetHint returns the hint from an encrypted file (backward compatibility)
 func (a *App) GetHint(inputFile string) string {
 	metadata := a.GetFileMetadata(inputFile)
 	if metadata == nil {
@@ -190,7 +196,6 @@ func (a *App) GetHint(inputFile string) string {
 	return metadata.Hint
 }
 
-// emitProgress emits progress updates to the frontend
 func (a *App) emitProgress(bytesProcessed, totalBytes int64, stage string) {
 	percentage := float64(bytesProcessed) / float64(totalBytes) * 100
 	if percentage > 100 {
@@ -207,13 +212,17 @@ func (a *App) emitProgress(bytesProcessed, totalBytes int64, stage string) {
 	runtime.EventsEmit(a.ctx, "encryption:progress", progress)
 }
 
-// Constants for encryption
 const (
 	ChunkSize = 1024 * 1024 // 1MB chunks
 )
 
 func (a *App) EncryptFile(inputFile string, password string, hint string, encryptionLevel string, channel int, encryptionMethod string, deleteOriginal bool) string {
-	// Create cancellable operation
+	logging.LogInfo("EncryptFile called with method: '%s'", encryptionMethod)
+	return a.encryptFileInternal(inputFile, password, hint, encryptionLevel, channel, encryptionMethod, deleteOriginal, true)
+}
+
+// encryptFileInternal handles the actual encryption with option to show notifications
+func (a *App) encryptFileInternal(inputFile string, password string, hint string, encryptionLevel string, channel int, encryptionMethod string, deleteOriginal bool, showNotifications bool) string {
 	a.operationMutex.Lock()
 	if a.currentOperation != nil {
 		a.currentOperation.Cancel()
@@ -233,17 +242,14 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 		return "Encryption failed: password cannot be empty."
 	}
 
-	// Get file info for progress tracking
 	fileInfo, err := os.Stat(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error getting file info: %v", err)
 	}
 	totalSize := fileInfo.Size()
 
-	// Convert encryption method string to crypto type
 	method := crypto.EncryptionMethod(encryptionMethod)
 
-	// Get level parameters
 	level := crypto.EncryptionLevels[encryptionLevel]
 	if encryptionLevel == "" {
 		level = crypto.EncryptionLevels["Normal"]
@@ -252,12 +258,10 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 	passwordBytes := []byte(password)
 	methodCode := crypto.GetMethodCode(method)
 
-	// Create output file name without revealing original extension
 	baseFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
 	outputDir := filepath.Dir(inputFile)
 	outputFile := filepath.Join(outputDir, baseFileName+".gie")
 
-	// Generate salts
 	aesKeySalt, err := crypto.GenerateSalt(32)
 	if err != nil {
 		return fmt.Sprintf("error generating AES key salt: %v", err)
@@ -268,21 +272,29 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 		return fmt.Sprintf("error generating HMAC key salt: %v", err)
 	}
 
-	// Derive keys
 	aesKey, hmacKey := crypto.DeriveKeys(passwordBytes, aesKeySalt, hmacKeySalt, level)
 
+	var ivSize int
+	switch method {
+	case crypto.AES_CTR:
+		ivSize = 16 // AES-CTR IV size
+	case crypto.CHACHA20:
+		ivSize = 12 // ChaCha20 nonce size
+	default:
+		ivSize = 16 // Default to AES-CTR
+	}
+
 	logging.LogInfo("=== ENCRYPTION KEY DERIVATION ===")
+	logging.LogInfo("Encryption Method: %s", string(method))
 	logging.LogInfo("Password: '%s' (length: %d)", password, len(password))
 	logging.LogInfo("Password bytes: %x", passwordBytes)
 	logging.LogInfo("Level: %s (iterations: %d)", encryptionLevel, level.Iterations)
 	logging.LogInfo("Channel: %d", channel)
-	logging.LogInfo("AES salt (full): %x", aesKeySalt)
+	logging.LogInfo("Cipher key salt (full): %x", aesKeySalt)
 	logging.LogInfo("HMAC salt (full): %x", hmacKeySalt)
-	logging.LogInfo("Derived AES key (full): %x", aesKey)
+	logging.LogInfo("Derived cipher key (full): %x", aesKey)
 	logging.LogInfo("Derived HMAC key (full): %x", hmacKey)
-
-	// Create encryptor
-	ivSize := 16 // AES-CTR IV size
+	logging.LogInfo("IV/Nonce size: %d bytes", ivSize)
 
 	iv, err := crypto.GenerateIV(ivSize)
 	if err != nil {
@@ -301,14 +313,13 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 	}
 	defer inFile.Close()
 
-	// Create output file
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Sprintf("error creating output file: %v", err)
 	}
 	defer outFile.Close()
 
-	// Get original file extension
+	// Get original file extension ...
 	originalExt := filepath.Ext(inputFile)
 	originalExtBytes := []byte(originalExt)
 	originalExtLen := uint16(len(originalExtBytes))
@@ -318,7 +329,6 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 	hintBytes := []byte(hint)
 	hintLen := uint16(len(hintBytes))
 
-	// Get encryption level code
 	levelCode := crypto.EncryptionLevelCodes[encryptionLevel]
 	if encryptionLevel == "" {
 		levelCode = crypto.EncryptionLevelCodes["Normal"]
@@ -337,17 +347,14 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 
 	logging.LogInfo("Original extension saved: '%s'", originalExt)
 
-	// Write metadata to file
 	_, err = outFile.Write(metadataBuffer.Bytes())
 	if err != nil {
 		return fmt.Sprintf("error writing metadata: %v", err)
 	}
 
-	// Initialize HMAC and feed it the metadata
 	hmacHasher := hmac.New(sha256.New, hmacKey)
 	hmacHasher.Write(metadataBuffer.Bytes())
 
-	// Create a multi-writer to write to both file and HMAC
 	multiWriter := io.MultiWriter(outFile, hmacHasher)
 
 	// Encrypt data in chunks
@@ -420,14 +427,16 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 
 	logging.LogInfo("Encryption completed successfully: %s", outputFile)
 
-	// Show success notification
-	fileName := filepath.Base(strings.TrimSuffix(outputFile, ".gie"))
-	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
-		"type":     "success",
-		"title":    "Encryption Completed",
-		"message":  fmt.Sprintf("File '%s' has been encrypted successfully", fileName),
-		"duration": 5000,
-	})
+	// Show success notification only if requested
+	if showNotifications {
+		fileName := filepath.Base(strings.TrimSuffix(outputFile, ".gie"))
+		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+			"type":     "success",
+			"title":    "Encryption Completed",
+			"message":  fmt.Sprintf("File '%s' has been encrypted successfully", fileName),
+			"duration": 5000,
+		})
+	}
 
 	// Only restore the level to default, keep the user's channel for convenience
 	if a.settings != nil {
@@ -446,6 +455,11 @@ func (a *App) EncryptFile(inputFile string, password string, hint string, encryp
 }
 
 func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) string {
+	return a.decryptFileInternal(inputFile, password, verifyMode, true)
+}
+
+// decryptFileInternal handles the actual decryption with option to show notifications
+func (a *App) decryptFileInternal(inputFile string, password string, verifyMode bool, showNotifications bool) string {
 	// Auto-detect only the encryption level (channel remains as user's second password)
 	if !verifyMode {
 		metadata := a.GetFileMetadata(inputFile)
@@ -478,14 +492,12 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 		return "Decryption failed: password cannot be empty."
 	}
 
-	// Get file size for progress tracking first (before opening file)
 	fileInfo, err := os.Stat(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error getting file info: %v", err)
 	}
 	totalSize := fileInfo.Size()
 
-	// Open input file fresh for each operation
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Sprintf("error opening input file: %v", err)
@@ -498,7 +510,6 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 		return fmt.Sprintf("error seeking to start of file: %v", err)
 	}
 
-	// Read metadata with a fresh buffer for each operation
 	var metadataBuffer bytes.Buffer
 	metadataReader := io.TeeReader(inFile, &metadataBuffer)
 
@@ -520,7 +531,7 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 		return fmt.Sprintf("error reading method code: %v", err)
 	}
 
-	// Read channel as uint16 (new format)
+	// Read channel as uint16
 	var channel uint16
 	err = binary.Read(metadataReader, binary.BigEndian, &channel)
 	if err != nil {
@@ -566,7 +577,15 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 
 	// Determine IV size based on method
 	method := crypto.GetMethodFromCode(methodCode)
-	ivSize := 16 // AES-CTR IV size
+	var ivSize int
+	switch method {
+	case crypto.AES_CTR:
+		ivSize = 16 // AES-CTR IV size
+	case crypto.CHACHA20:
+		ivSize = 12 // ChaCha20 nonce size
+	default:
+		ivSize = 16 // Default to AES-CTR
+	}
 
 	iv := make([]byte, ivSize)
 	_, err = metadataReader.Read(iv)
@@ -580,14 +599,16 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 	if int(channel) != a.settings.LastUsedChannel {
 		logging.LogInfo("Channel mismatch detected - rejecting decryption")
 
-		// Show error notification for incorrect channel
-		fileName := filepath.Base(inputFile)
-		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
-			"type":     "error",
-			"title":    "Decryption Failed",
-			"message":  fmt.Sprintf("Incorrect channel for file '%s'. Please check your channel setting.", fileName),
-			"duration": 8000,
-		})
+		// Show error notification for incorrect channel only if requested
+		if showNotifications {
+			fileName := filepath.Base(inputFile)
+			runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+				"type":     "error",
+				"title":    "Decryption Failed",
+				"message":  fmt.Sprintf("Incorrect channel for file '%s'. Please check your channel setting.", fileName),
+				"duration": 8000,
+			})
+		}
 
 		// Clear decrypt attempts counter on failure
 		a.attemptsMutex.Lock()
@@ -608,22 +629,24 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 	passwordBytes := []byte(password)
 	levelName := crypto.EncryptionLevelCodesReverse[levelCode]
 	if levelName == "" {
-		levelName = "Normal" // Fallback to Normal if level code is invalid
+		levelName = "Normal"
 	}
 	level := crypto.EncryptionLevels[levelName]
 
 	logging.LogInfo("=== KEY DERIVATION DEBUG ===")
+	logging.LogInfo("Decryption Method: %s", string(method))
 	logging.LogInfo("Password: '%s' (length: %d)", password, len(password))
 	logging.LogInfo("Password bytes: %x", passwordBytes)
 	logging.LogInfo("Level code from file: %d", levelCode)
 	logging.LogInfo("Level name: %s", levelName)
 	logging.LogInfo("Level iterations: %d", level.Iterations)
-	logging.LogInfo("AES salt (full): %x", aesKeySalt)
+	logging.LogInfo("Cipher key salt (full): %x", aesKeySalt)
 	logging.LogInfo("HMAC salt (full): %x", hmacKeySalt)
+	logging.LogInfo("IV/Nonce size: %d bytes", ivSize)
 
 	aesKey, hmacKey := crypto.DeriveKeys(passwordBytes, aesKeySalt, hmacKeySalt, level)
 
-	logging.LogInfo("Derived AES key (full): %x", aesKey)
+	logging.LogInfo("Derived cipher key (full): %x", aesKey)
 	logging.LogInfo("Derived HMAC key (full): %x", hmacKey)
 
 	// Initialize HMAC and feed it the metadata
@@ -681,14 +704,16 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 	if !hmac.Equal(storedHmac, computedHmac) {
 		logging.LogInfo("=== HMAC MISMATCH - DECRYPTION FAILED ===")
 
-		// Show error notification for incorrect password
-		fileName := filepath.Base(inputFile)
-		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
-			"type":     "error",
-			"title":    "Decryption Failed",
-			"message":  fmt.Sprintf("Incorrect password for file '%s'. Please check your password.", fileName),
-			"duration": 8000,
-		})
+		// Show error notification for incorrect password only if requested
+		if showNotifications {
+			fileName := filepath.Base(inputFile)
+			runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+				"type":     "error",
+				"title":    "Decryption Failed",
+				"message":  fmt.Sprintf("Incorrect password for file '%s'. Please check your password.", fileName),
+				"duration": 8000,
+			})
+		}
 
 		return "Invalid password or channel."
 	}
@@ -753,7 +778,6 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 	}
 	defer outFile.Close()
 
-	// Decrypt data in chunks with real progress tracking
 	limitedReader := io.LimitReader(inFile, ciphertextLength)
 	var bytesProcessed int64 = 0
 
@@ -836,17 +860,19 @@ func (a *App) DecryptFile(inputFile string, password string, verifyMode bool) st
 
 	logging.LogInfo("Decryption completed successfully: %s", finalOutputFile)
 
-	// Show success notification
-	fileName := filepath.Base(finalOutputFile)
-	runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
-		"type":     "success",
-		"title":    "Decryption Completed",
-		"message":  fmt.Sprintf("File '%s' has been decrypted successfully", fileName),
-		"duration": 5000,
-	})
+	// Show success notification only if requested
+	if showNotifications {
+		fileName := filepath.Base(finalOutputFile)
+		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+			"type":     "success",
+			"title":    "Decryption Completed",
+			"message":  fmt.Sprintf("File '%s' has been decrypted successfully", fileName),
+			"duration": 5000,
+		})
+	}
 
-	// Note: Do not restore settings after decryption - user needs to manually set channel
-	// a.RestoreDefaultSettings()
+	// Note: Do not restore settings after decryption - user needs to manually set channel <-- ()
+	// a.RestoreDefaultSettings() <-- This make me sick
 
 	return "success"
 }
@@ -859,6 +885,19 @@ func (a *App) CancelOperation() {
 	if a.currentOperation != nil {
 		a.currentOperation.Cancel()
 		logging.LogInfo("Operation cancelled by user")
+
+		// Emit cancellation event to frontend
+		runtime.EventsEmit(a.ctx, "operation:cancelled", map[string]interface{}{
+			"message": "Operation cancelled by user",
+		})
+
+		// Show cancellation notification
+		runtime.EventsEmit(a.ctx, "notification", map[string]interface{}{
+			"type":     "info",
+			"title":    "Operation Cancelled",
+			"message":  "The current operation has been cancelled",
+			"duration": 3000,
+		})
 	}
 }
 
@@ -866,6 +905,7 @@ func (a *App) CancelOperation() {
 func (a *App) GetAvailableEncryptionMethods() []string {
 	return []string{
 		string(crypto.AES_CTR),
+		string(crypto.CHACHA20),
 	}
 }
 
@@ -962,8 +1002,8 @@ func (a *App) EncryptDirectory(inputDir string, password string, hint string, en
 			"TotalBytes":     int64(len(files)),
 		})
 
-		// Encrypt individual file
-		result := a.EncryptFile(filePath, password, hint, encryptionLevel, channel, encryptionMethod, deleteOriginal)
+		// Encrypt individual file (without notifications)
+		result := a.encryptFileInternal(filePath, password, hint, encryptionLevel, channel, encryptionMethod, deleteOriginal, false)
 
 		if result == "success" {
 			successCount++
@@ -1057,8 +1097,8 @@ func (a *App) DecryptDirectory(inputDir string, password string) string {
 			"TotalBytes":     int64(len(encryptedFiles)),
 		})
 
-		// Decrypt individual file
-		result := a.DecryptFile(filePath, password, false)
+		// Decrypt individual file (without notifications)
+		result := a.decryptFileInternal(filePath, password, false, false)
 
 		if result == "success" {
 			successCount++
@@ -1095,17 +1135,14 @@ func (a *App) DecryptDirectory(inputDir string, password string) string {
 	return "success"
 }
 
-// OpenExternalURL opens an external URL in the default browser
 func (a *App) OpenExternalURL(url string) error {
 	logging.LogInfo("Opening external URL: %s", url)
 
-	// Use runtime.BrowserOpenURL to open URL in default browser
 	runtime.BrowserOpenURL(a.ctx, url)
 
 	return nil
 }
 
-// SetTheme sets the application theme
 func (a *App) SetTheme(theme string) error {
 	if a.settings != nil {
 		a.settings.Theme = theme
@@ -1114,7 +1151,18 @@ func (a *App) SetTheme(theme string) error {
 	return fmt.Errorf("settings not initialized")
 }
 
-// SetDeleteOriginal sets the delete original file setting
+/*
+*
+SetDeleteOriginal sets the value of the DeleteOriginal field in the app's settings and saves the settings to file.
+
+If the app's settings are not initialized, it returns an error.
+
+Parameters:
+- deleteOriginal: The new value of the DeleteOriginal field.
+
+Returns:
+- An error if the app's settings are not initialized.
+*/
 func (a *App) SetDeleteOriginal(deleteOriginal bool) error {
 	if a.settings != nil {
 		a.settings.DeleteOriginal = deleteOriginal
@@ -1123,7 +1171,70 @@ func (a *App) SetDeleteOriginal(deleteOriginal bool) error {
 	return fmt.Errorf("settings not initialized")
 }
 
-// RestoreDefaultSettings restores channel and level to defaults while preserving theme
+func (a *App) GetDebugLogs() []string {
+	return logging.GetDebugLogs()
+}
+
+func (a *App) ClearDebugLogs() {
+	logging.ClearDebugLogs()
+	logging.LogInfo("Debug logs cleared by user")
+}
+
+func (a *App) GetSystemInfo() map[string]interface{} {
+	var m goruntime.MemStats
+	goruntime.ReadMemStats(&m)
+
+	wd, _ := os.Getwd()
+
+	return map[string]interface{}{
+		"os":         goruntime.GOOS,
+		"arch":       goruntime.GOARCH,
+		"goVersion":  goruntime.Version(),
+		"cpus":       goruntime.NumCPU(),
+		"goroutines": goruntime.NumGoroutine(),
+		"memAlloc":   m.Alloc / 1024,
+		"memTotal":   m.TotalAlloc / 1024,
+		"memSys":     m.Sys / 1024,
+		"workingDir": wd,
+		"logPath":    logging.GetLogPath(),
+	}
+}
+
+// ResizeWindow resizes the window to the specified width and height
+//
+// Parameters:
+// - width: the new width of the window
+// - height: the new height of the window
+//
+// Returns: None
+func (a *App) ResizeWindow(width, height int) {
+	runtime.WindowSetSize(a.ctx, width, height)
+	logging.LogInfo("Window resized to %dx%d", width, height)
+}
+
+// SetWindowResizable sets whether the window can be resized by the user
+// Note: WindowSetResizable may not be available in all Wails versions
+func (a *App) SetWindowResizable(resizable bool) {
+	// This function is kept for compatibility but may not work in all versions
+	logging.LogInfo("Window resizable setting requested: %v (may not be supported)", resizable)
+}
+
+// RestoreDefaultSettings restores the settings to their default values, preserving the theme.
+//
+// This function restores the settings to their default values, preserving the theme. The default
+// values are:
+// - LastUsedChannel: 50
+// - LastUsedLevel: "Normal"
+//
+// The function returns an error if the settings are not initialized.
+//
+// Parameters:
+//
+//	None
+//
+// Returns:
+//
+//	error: An error if the settings are not initialized.
 func (a *App) RestoreDefaultSettings() error {
 	if a.settings != nil {
 		// Preserve theme but reset other values to defaults
@@ -1201,7 +1312,6 @@ func (a *App) LoadFileForDecryption(inputFile string) *FileMetadata {
 	return metadata
 }
 
-// ValidateFileChannel checks if the file's channel matches the user's current channel
 func (a *App) ValidateFileChannel(inputFile string) bool {
 	metadata := a.GetFileMetadata(inputFile)
 	if metadata == nil {

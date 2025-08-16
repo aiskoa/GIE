@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 build/bin
+build
 frontend/dist
 dist
 dist-ssr
@@ -56,6 +57,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+gie.exe
 
 # local env files
 .env

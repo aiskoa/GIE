@@ -6,7 +6,6 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// EncryptionLevel represents different security levels
 type EncryptionLevel struct {
 	Iterations int
 	KeyLength  int
@@ -14,9 +13,9 @@ type EncryptionLevel struct {
 
 // Predefined encryption levels
 var EncryptionLevels = map[string]EncryptionLevel{
-	"Low":    {Iterations: 10000, KeyLength: 32},    // Fast but less secure
-	"Normal": {Iterations: 800000, KeyLength: 32},   // Balanced
-	"High":   {Iterations: 12000000, KeyLength: 32}, // Slow but very secure
+	"Low":    {Iterations: 10000, KeyLength: 32},
+	"Normal": {Iterations: 800000, KeyLength: 32},
+	"High":   {Iterations: 12000000, KeyLength: 32},
 }
 
 // Encryption level codes for file format
@@ -32,12 +31,10 @@ var EncryptionLevelCodesReverse = map[byte]string{
 	2: "High",
 }
 
-// DeriveKeyFromPassword derives a key from password using PBKDF2-HMAC-SHA256
 func DeriveKeyFromPassword(password, salt []byte, iterations, keyLength int) []byte {
 	return pbkdf2.Key(password, salt, iterations, keyLength, sha256.New)
 }
 
-// DeriveKeys derives both AES and HMAC keys from password
 func DeriveKeys(password []byte, aesSalt, hmacSalt []byte, level EncryptionLevel) (aesKey, hmacKey []byte) {
 	aesKey = DeriveKeyFromPassword(password, aesSalt, level.Iterations, level.KeyLength)
 	hmacKey = DeriveKeyFromPassword(password, hmacSalt, level.Iterations, level.KeyLength)

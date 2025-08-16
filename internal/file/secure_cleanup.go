@@ -9,10 +9,9 @@ import (
 
 // SecureDelete performs secure deletion of a file by overwriting it multiple times
 func SecureDelete(filePath string) error {
-	// Check if file exists
 	fileInfo, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
-		return nil // File doesn't exist, nothing to delete
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("error checking file: %v", err)
@@ -20,14 +19,12 @@ func SecureDelete(filePath string) error {
 
 	fileSize := fileInfo.Size()
 
-	// Open file for writing
 	file, err := os.OpenFile(filePath, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("error opening file for secure deletion: %v", err)
 	}
 	defer file.Close()
 
-	// Perform multiple overwrite passes
 	passes := [][]byte{
 		make([]byte, 1024*1024), // 1MB buffer of zeros
 		make([]byte, 1024*1024), // 1MB buffer of ones
@@ -102,7 +99,6 @@ func CleanupTempFiles(directory string) error {
 		}
 	}
 
-	// Log results
 	if len(cleanedFiles) > 0 {
 		fmt.Printf("Securely cleaned %d temporary files: %v\n", len(cleanedFiles), cleanedFiles)
 	}

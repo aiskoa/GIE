@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -33,9 +34,7 @@ type Logger struct {
 
 var globalLogger *Logger
 
-// InitLogger initializes the global logger
 func InitLogger() error {
-	// Get user's documents directory or fallback to temp
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = os.TempDir()
@@ -46,7 +45,6 @@ func InitLogger() error {
 		return fmt.Errorf("failed to create log directory: %v", err)
 	}
 
-	// Create log file with timestamp
 	timestamp := time.Now().Format("2006-01-02")
 	logPath := filepath.Join(logDir, fmt.Sprintf("gie_%s.log", timestamp))
 
@@ -60,7 +58,6 @@ func InitLogger() error {
 		logPath: logPath,
 	}
 
-	// Log system information on startup
 	LogInfo("=== GIE v2.0.0 Started ===")
 	LogInfo("OS: %s", runtime.GOOS)
 	LogInfo("Architecture: %s", runtime.GOARCH)
@@ -70,7 +67,6 @@ func InitLogger() error {
 	return nil
 }
 
-// CloseLogger closes the log file
 func CloseLogger() {
 	if globalLogger != nil && globalLogger.logFile != nil {
 		LogInfo("=== GIE Session Ended ===")
@@ -78,31 +74,50 @@ func CloseLogger() {
 	}
 }
 
-// writeLog writes a log entry
-func writeLog(level LogLevel, format string, args ...interface{}) {
-	if globalLogger == nil || globalLogger.logFile == nil {
-		return
-	}
+var debugLogBuffer []string
+var debugLogMutex sync.RWMutex
+var maxDebugLogs = 1000
 
+func writeLog(level LogLevel, format string, args ...interface{}) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	levelName := logLevelNames[level]
 	message := fmt.Sprintf(format, args...)
 
-	// Get caller information
 	_, file, line, ok := runtime.Caller(2)
 	caller := "unknown"
 	if ok {
 		caller = fmt.Sprintf("%s:%d", filepath.Base(file), line)
 	}
 
-	logEntry := fmt.Sprintf("[%s] %s [%s] %s\n", timestamp, levelName, caller, message)
+	logEntry := fmt.Sprintf("[%s] %s [%s] %s", timestamp, levelName, caller, message)
 
-	// Write to file
-	globalLogger.logFile.WriteString(logEntry)
-	globalLogger.logFile.Sync() // Ensure immediate write
+	debugLogMutex.Lock()
+	debugLogBuffer = append(debugLogBuffer, logEntry)
+	if len(debugLogBuffer) > maxDebugLogs {
+		debugLogBuffer = debugLogBuffer[1:]
+	}
+	debugLogMutex.Unlock()
 
-	// Also write to console for debugging
-	fmt.Print(logEntry)
+	if globalLogger != nil && globalLogger.logFile != nil && (level >= ERROR) {
+		globalLogger.logFile.WriteString(logEntry + "\n")
+		globalLogger.logFile.Sync()
+	}
+}
+
+func GetDebugLogs() []string {
+	debugLogMutex.RLock()
+	defer debugLogMutex.RUnlock()
+
+	// Return a copy of the buffer
+	logs := make([]string, len(debugLogBuffer))
+	copy(logs, debugLogBuffer)
+	return logs
+}
+
+func ClearDebugLogs() {
+	debugLogMutex.Lock()
+	defer debugLogMutex.Unlock()
+	debugLogBuffer = nil
 }
 
 // Log functions
@@ -126,7 +141,6 @@ func LogCritical(format string, args ...interface{}) {
 	writeLog(CRITICAL, format, args...)
 }
 
-// GetLogPath returns the current log file path
 func GetLogPath() string {
 	if globalLogger != nil {
 		return globalLogger.logPath
@@ -134,7 +148,6 @@ func GetLogPath() string {
 	return ""
 }
 
-// LogSystemInfo logs detailed system information
 func LogSystemInfo() {
 	LogInfo("=== System Information ===")
 	LogInfo("Number of CPUs: %d", runtime.NumCPU())
